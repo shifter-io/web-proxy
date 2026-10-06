@@ -302,6 +302,9 @@ async fn resolve(packet: &ConnectPacket, state: &State) -> Result<IpAddr> {
     if state.cfg.test_mode && (host == "fixture.test" || host == "second.test") {
         return Ok("203.0.113.10".parse()?);
     }
+    if state.cfg.test_mode && host == "failed-upstream.test" {
+        return Ok("203.0.113.11".parse()?);
+    }
     if host.len() > 253
         || host.is_empty()
         || host
@@ -334,8 +337,21 @@ async fn resolve(packet: &ConnectPacket, state: &State) -> Result<IpAddr> {
         .copied()
         .ok_or_else(|| anyhow::anyhow!("no address"))
 }
-async fn connect(packet: &ConnectPacket, state: &State, session: &Session) -> Result<TcpStream> {
-    let ip = resolve(packet, state).await?;
+#[derive(Debug)]
+struct UpstreamUnavailable;
+impl std::fmt::Display for UpstreamUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("upstream unavailable")
+    }
+}
+impl std::error::Error for UpstreamUnavailable {}
+
+async fn connect(
+    packet: &ConnectPacket,
+    ip: IpAddr,
+    state: &State,
+    session: &Session,
+) -> Result<TcpStream> {
     let user = state.cfg.username(&session.country, &session.sid)?;
     let mut socket =
         TcpStream::connect((state.cfg.upstream_host.as_str(), state.cfg.upstream_port)).await?;
@@ -374,6 +390,9 @@ async fn connect(packet: &ConnectPacket, state: &State, session: &Session) -> Re
     let mut reply = [0; 4];
     socket.read_exact(&mut reply).await?;
     if reply[0] != 5 || reply[1] != 0 {
+        if reply[0] == 5 && matches!(reply[1], 1 | 3 | 4 | 5 | 6) {
+            return Err(UpstreamUnavailable.into());
+        }
         bail!("upstream destination unavailable");
     }
     let count = match reply[3] {
@@ -395,14 +414,47 @@ async fn forward(
     cancel: CancellationToken,
 ) {
     let closer = stream.get_close_handle();
+    // DNS/policy failures are destination failures, never grounds for SID rotation.
+    let ip = match timeout(
+        Duration::from_secs(state.cfg.connect_timeout),
+        resolve(&packet, &state),
+    )
+    .await
+    {
+        Ok(Ok(ip)) => ip,
+        _ => {
+            state.metrics.rejected.fetch_add(1, Ordering::Relaxed);
+            let _ = timeout(
+                Duration::from_secs(1),
+                closer.close(CloseReason::ServerStreamUnreachable),
+            )
+            .await;
+            return;
+        }
+    };
     let connection = timeout(
         Duration::from_secs(state.cfg.connect_timeout),
-        connect(&packet, &state, &s),
+        connect(&packet, ip, &state, &s),
     )
     .await;
     let tcp = match connection {
         Ok(Ok(tcp)) => tcp,
-        _ => {
+        failure => {
+            let transient = match failure {
+                Err(_) => true,
+                Ok(Err(error)) => error.is::<std::io::Error>() || error.is::<UpstreamUnavailable>(),
+                _ => false,
+            };
+            if transient
+                && state
+                    .store
+                    .upstream_failed(&s, &owner, &packet.host)
+                    .await
+                    .is_err()
+            {
+                // Storage failures stop this transport; no unaccounted fallback.
+                cancel.cancel();
+            }
             state.metrics.rejected.fetch_add(1, Ordering::Relaxed);
             let _ = timeout(
                 Duration::from_secs(1),

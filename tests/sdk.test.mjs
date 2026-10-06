@@ -22,7 +22,7 @@ function environment(t) {
     else if(url.endsWith('/sessions')) {
       if(failStart) return {ok:false,status:403,json:async()=>({code:'CAPTCHA_REJECTED',error:'Please retry verification'})};
       data={session,credential:'a'.repeat(64)};
-    } else if(url.endsWith('/tickets')) data={ticket:'one-use-ticket'};
+    } else if(url.endsWith('/tickets')) data={ticket:'one-use-ticket',revision:1};
     else if(url.endsWith('/country')) data={...session,country:JSON.parse(options.body).country};
     else data=statusResponse || session;
     return {ok:true,status:200,json:async()=>data};
@@ -202,4 +202,97 @@ test('country change waits for cleanup and reload preserves the assignment',asyn
   const sent=[];document.querySelector('iframe').contentWindow.postMessage=data=>sent.push(data);
   const reload=e.proxy.reload();await flush();t.mock.timers.tick(6500);await reload;
   assert.equal(sent.at(-1).command,'reconnect');assert.equal(e.proxy.getState().country,'de');
+});
+
+async function recoveryEnvironment(t) {
+  t.mock.timers.enable({apis:['setTimeout']});
+  const e=environment(t);await e.start();
+  const sent=[];document.querySelector('iframe').contentWindow.postMessage=data=>sent.push(data);
+  e.runtimeMessage('ready');await flush();
+  e.fail=(overrides={})=>e.runtimeMessage('proxy-failure',{engineId:sent.at(-1).engineId,method:'GET',url:'https://example.com/',reason:'websocket',...overrides});
+  e.sent=sent;
+  e.advance=async(ms)=>{t.mock.timers.tick(ms);await flush();};
+  return e;
+}
+
+test('safe proxy failures recover twice without exposing errors; stale transports cannot complete a retry',async t=>{
+  const e=await recoveryEnvironment(t), states=[];e.proxy.subscribe(state=>states.push(state));
+  const original=e.sent.at(-1).engineId;
+  const expiry=e.proxy.getState().session.expiresAt;
+  for(let i=1;i<=2;i++) {
+    e.fail();e.fail();await e.advance(i*300);
+    assert.equal(e.requests.filter(r=>r.url.endsWith('/recover')).length,i);
+    assert.equal(e.proxy.getState().loading,true);assert.equal(e.proxy.getState().error,null);
+    await e.advance(6500);
+    assert.equal(e.sent.at(-1).command,'reconnect');assert.notEqual(e.sent.at(-1).engineId,original);
+    e.runtimeMessage('loaded',{engineId:original});assert.equal(e.proxy.getState().loading,true);
+  }
+  assert.ok(states.every(s=>s.error===null));
+  e.fail();await flush();assert.equal(e.proxy.getState().status,'interrupted');
+  assert.equal(e.requests.filter(r=>r.url.endsWith('/recover')).length,2);
+  assert.equal(e.proxy.getState().session.expiresAt,expiry);
+  assert.equal(e.proxy.getState().session.remainingBytes,1000);
+});
+
+test('successful recovery completes loading and resets the retry budget',async t=>{
+  const e=await recoveryEnvironment(t);e.fail();await e.advance(300);await e.advance(6500);
+  e.runtimeMessage('loaded',{engineId:e.sent.at(-1).engineId});
+  assert.equal(e.proxy.getState().loading,false);assert.equal(e.proxy.getState().status,'browsing');
+  e.fail({reason:'upstream'});await e.advance(300);
+  assert.equal(JSON.parse(e.requests.filter(r=>r.url.endsWith('/recover')).at(-1).options.body).reason,'upstream');
+});
+
+for(const overrides of [{method:'POST'},{method:'PUT'},{reason:'runtime'},{engineId:'stale'}]) {
+  test(`unsafe or stale failure is never replayed: ${JSON.stringify(overrides)}`,async t=>{
+    const e=await recoveryEnvironment(t);e.fail(overrides);await e.advance(1000);
+    assert.ok(!e.requests.some(r=>r.url.endsWith('/recover')));
+  });
+}
+
+test('Stop cancels recovery backoff and never creates another ticket',async t=>{
+  const e=await recoveryEnvironment(t);e.fail();
+  const stop=e.proxy.stop();await flush();e.runtimeMessage('cleared');await stop;
+  await e.advance(10000);
+  assert.equal(e.proxy.getState().status,'stopped');
+  assert.ok(!e.requests.some(r=>r.url.endsWith('/recover')));
+  assert.equal(e.requests.filter(r=>r.url.endsWith('/tickets')).length,1);
+});
+
+test('destroy during recovery prevents future reconnects',async t=>{
+  const e=await recoveryEnvironment(t);e.fail();await e.advance(300);e.proxy.destroy();await e.advance(10000);
+  assert.equal(e.sent.filter(d=>d.command==='reconnect').length,0);
+  assert.equal(e.requests.filter(r=>r.url.endsWith('/tickets')).length,1);
+});
+
+test('server authorization/quota/storage refusal never loops or exposes technical details',async t=>{
+  const e=await recoveryEnvironment(t), originalFetch=globalThis.fetch;
+  t.mock.method(globalThis,'fetch',async(url,options)=>url.endsWith('/recover')?{ok:false,status:503,json:async()=>({code:'STORAGE_UNAVAILABLE',error:'internal Redis trace'})}:originalFetch(url,options));
+  e.fail();await e.advance(300);await e.advance(10000);
+  assert.equal(e.sent.filter(d=>d.command==='reconnect').length,0);
+  assert.equal(e.proxy.getState().status,'interrupted');assert.doesNotMatch(e.proxy.getState().error.message,/Redis|trace/);
+});
+
+test('Stop during the retired-lease wait cancels the pending replacement ticket',async t=>{
+  const e=await recoveryEnvironment(t);e.fail();await e.advance(300);
+  const stop=e.proxy.stop();await flush();e.runtimeMessage('cleared');await stop;
+  await e.advance(10000);
+  assert.equal(e.requests.filter(r=>r.url.endsWith('/tickets')).length,1);
+  assert.equal(e.proxy.getState().status,'stopped');
+});
+
+test('a new navigation cancels recovery and uses its own URL after transport revocation',async t=>{
+  const e=await recoveryEnvironment(t);e.fail();await e.advance(300);
+  const navigation=e.proxy.navigate('example.org');await flush();await e.advance(6500);await navigation;
+  assert.equal(e.sent.at(-1).url,'https://example.org/');
+  assert.equal(e.sent.filter(d=>d.command==='reconnect').length,1);
+});
+
+test('quota exhaustion during recovery retains the exhausted state and clears the runtime',async t=>{
+  const e=await recoveryEnvironment(t), originalFetch=globalThis.fetch;
+  e.setStatus({...e.proxy.getState().session,status:'exhausted',remainingBytes:0});
+  t.mock.method(globalThis,'fetch',async(url,options)=>url.endsWith('/recover')?{ok:false,status:410,json:async()=>({code:'SESSION_ENDED',error:'Browsing session ended'})}:originalFetch(url,options));
+  e.fail();await e.advance(300);
+  assert.equal(e.proxy.getState().status,'exhausted');assert.equal(e.proxy.getState().active,false);
+  e.runtimeMessage('cleared');await flush();
+  assert.equal(e.sent.filter(d=>d.command==='reconnect').length,0);
 });

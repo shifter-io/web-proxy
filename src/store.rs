@@ -159,6 +159,57 @@ impl Store {
         let _: i64 = self.db.clone().hincr(&session.key, "rev", 1).await?;
         Ok(())
     }
+    /// Only the current gateway owner can attest to a failed upstream connection.
+    pub async fn upstream_failed(&self, s: &Session, owner: &str, host: &str) -> Result<()> {
+        let _: i64 = Script::new(
+            r#"
+            if redis.call('HGET',KEYS[1],'rev')~=ARGV[1]
+              or redis.call('HGET',KEYS[1],'owner')~=ARGV[2] then return 0 end
+            redis.call('SET',KEYS[2],ARGV[1],'EX',30)
+            return 1
+        "#,
+        )
+        .key(&s.key)
+        .key(format!(
+            "{}:failure:{}",
+            s.key,
+            host.trim_end_matches('.').to_ascii_lowercase()
+        ))
+        .arg(s.revision)
+        .arg(owner)
+        .invoke_async(&mut self.db.clone())
+        .await?;
+        Ok(())
+    }
+    /// Compare-and-swap prevents duplicate/stale recovery from rotating a new session.
+    /// Never clear the lease: the old gateway must stop before another can claim it.
+    pub async fn recover(
+        &self,
+        s: &Session,
+        revision: u64,
+        host: &str,
+        upstream: bool,
+    ) -> Result<bool> {
+        let ok: i64 = Script::new(r#"
+            if redis.call('HGET',KEYS[1],'rev')~=ARGV[1]
+              or redis.call('HGET',KEYS[1],'stopped')~='0' then return 0 end
+            if tonumber(redis.call('HGET',KEYS[1],'exp'))<=tonumber(ARGV[2])
+              or tonumber(redis.call('HGET',KEYS[1],'used'))>=tonumber(redis.call('HGET',KEYS[1],'limit')) then return 0 end
+            if ARGV[3]=='1' and redis.call('GET',KEYS[2])~=ARGV[1] then return 0 end
+            local start=tonumber(redis.call('HGET',KEYS[1],'recovery_start') or '0')
+            local count=tonumber(redis.call('HGET',KEYS[1],'recovery_count') or '0')
+            if tonumber(ARGV[2])-start>=30000 then start=tonumber(ARGV[2]); count=0 end
+            if count>=2 then return 0 end
+            redis.call('HSET',KEYS[1],'recovery_start',start,'recovery_count',count+1)
+            if ARGV[3]=='1' then redis.call('HSET',KEYS[1],'sid',ARGV[4]) end
+            redis.call('HINCRBY',KEYS[1],'rev',1)
+            redis.call('GETDEL',KEYS[2])
+            return 1
+        "#).key(&s.key).key(format!("{}:failure:{}", s.key, host.trim_end_matches('.').to_ascii_lowercase()))
+            .arg(revision).arg(now_ms()).arg(if upstream {1} else {0}).arg(random_id())
+            .invoke_async(&mut self.db.clone()).await?;
+        Ok(ok == 1)
+    }
     pub async fn claim(&self, ticket: &str, owner: &str) -> Result<Session> {
         let raw: Option<String> = redis::cmd("GETDEL")
             .arg(format!("ticket:{ticket}"))

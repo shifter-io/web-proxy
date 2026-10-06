@@ -158,6 +158,11 @@ try {
   assert.equal(await websocket(ticket,'https://wrong.example'),403);
   assert.equal(await websocket(ticket),101);
   assert.notEqual(await websocket(ticket),101,'tickets must remain single use');
+  const priorSid=(await rcmd('HGET',key,'sid')).trim();
+  await rcmd('SET',`${key}:failure:example.com`,'1','EX','30');
+  const recovery=await request(runtime,'/api/v1/session/recover',{method:'POST',headers:{...apiHeaders,'Content-Type':'application/json'},body:{revision:1,url:'https://example.com/',reason:'upstream'}});
+  assert.equal(recovery.status,200,recovery.body);
+  assert.notEqual((await rcmd('HGET',key,'sid')).trim(),priorSid,'recovery works with the least-privilege application ACL');
   for (const [urlFile,caFile] of [['bad-password',''],['bad-hostname','/run/redis-tls/ca.crt'],['tls-url','']]) {
     let rejected=false;
     try {await dc(['run','--rm','--no-deps','-e',`REDIS_URL_FILE=/run/redis-tls/${urlFile}`,'-e',`REDIS_CA_FILE=${caFile}`,'api']);}
@@ -181,6 +186,7 @@ try {
   // Stop only this disposable fixture; the API must fail closed on lost quota storage.
   await dc(['stop','redis']);
   assert.equal((await request(runtime,'/api/v1/session/tickets',{method:'POST',headers:apiHeaders})).status,503);
+  assert.equal((await request(runtime,'/api/v1/session/recover',{method:'POST',headers:{...apiHeaders,'Content-Type':'application/json'},body:{revision:2,url:'https://example.com/',reason:'websocket'}})).status,503);
   const logs=await dc(['logs','--no-color','api','gateway-a','gateway-b','haproxy']);
   assert.ok(!logs.includes(secret) && !logs.includes(ticket),'credentials/tickets must not appear in logs');
   const result={passed:true,https:true,redirects:true,cookieFreeBearer:true,exactCors:true,legacyApiDisabled:true,authenticatedWss:true,singleUseTickets:true,redisAcl:true,redisTls,rejectBadPassword:true,rejectWrongHostname:true,rejectUntrustedCa:true,redisPrivate:true,redisUnreachableFromHAProxy:true,storageFailureClosed:true};

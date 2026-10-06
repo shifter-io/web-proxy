@@ -1,4 +1,3 @@
-import {PageLoading} from './page-loading.js';
 import {initShifterReveals} from './shifter-reveal.js';
 import {renderCountryOrbits} from './country-orbits.js';
 import {renderCountryMarquee} from './country-marquee.js';
@@ -6,9 +5,6 @@ import {CountryPicker} from './country-picker.js';
 initShifterReveals();
 const $ = id => document.getElementById(id);
 const countryPicker = new CountryPicker();
-const pageLoading = new PageLoading($('page-loading'), $('viewport'), () => {
-  notice('This page is taking longer to load. You can wait, select Reload, or try another website.');
-});
 const proxy = ShifterWebProxy.create({container:$('runtime-host'), ...(window.SHIFTER_API_ORIGIN ? {apiOrigin:window.SHIFTER_API_ORIGIN} : {})});
 let current = proxy.getState(), configured = false, landingScroll = 0, countriesLoaded = false, loading = false;
 function notice(text = '') { $('notice').textContent = text; $('notice').hidden = !text; }
@@ -48,7 +44,12 @@ proxy.subscribe(state => {
   $('empty').hidden = state.active || ended;
   $('expired').hidden = !ended;
   $('resume').hidden = !state.active || document.body.classList.contains('is-browsing');
-  if (state.loading !== loading) { loading = state.loading; if (loading) pageLoading.start(); else pageLoading.finish(); }
+  // The SDK owns loading deadlines, including silent connection recovery.
+  if (state.loading !== loading) {
+    loading = state.loading;
+    $('page-loading').hidden = !loading;
+    $('viewport').setAttribute('aria-busy', String(loading));
+  }
   notice(state.error?.message || (state.persistent === false ? 'Browser storage is unavailable. Your session will not be remembered after this page closes.' : ''));
   if (ended) browserMode(true);
 });

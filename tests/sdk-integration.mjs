@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import {randomBytes,createHash} from 'node:crypto';
 import {docker} from './docker.mjs';
+import {Wisp, sleep} from './client.mjs';
 const base=process.env.CONTROL_ORIGIN || 'http://localhost:8180';
 const origins=['https://example.com','https://second.example.com'];
 const hash=value=>createHash('sha256').update(value).digest('hex');
@@ -51,6 +52,43 @@ assert.ok(Number(await redis('TTL',`identity:${hash(first.credential)}`))>29*864
 const second=await api('sessions',{method:'POST',origin:origins[1],body:{country:'us',captchaToken:await challenge(origins[1])}});
 assert.equal(second.session.remainingBytes,first.session.remainingBytes);
 const {ticket}=await api('session/tickets',{method:'POST',credential:first.credential});assert.equal(ticket.length,32);
+const credential=first.credential;
+let revision=Number(await redis('HGET',key,'rev'));
+const sid=await redis('HGET',key,'sid');
+const recovery={revision,url:'http://failed-upstream.test/',reason:'upstream'};
+await api('session/recover',{method:'POST',body:recovery,expected:401});
+await api('session/recover',{method:'POST',body:recovery,credential,origin:origins[1],expected:401});
+await api('session/recover',{method:'POST',body:recovery,credential,expected:409});
+const connection=await Wisp.connect(ticket);
+try {
+  await assert.rejects(connection.request('failed-upstream.test'));
+  assert.equal(await redis('GET',`${key}:failure:failed-upstream.test`),String(revision));
+  // The gateway must not record DNS/policy rejections as upstream failures.
+  await assert.rejects(connection.request('127.0.0.1'));
+  assert.equal(await redis('GET',`${key}:failure:127.0.0.1`),'');
+  const races=await Promise.all([1,2].map(()=>fetch(base+'/api/v1/session/recover',{method:'POST',headers:{Origin:origins[0],Authorization:`Bearer ${credential}`,'Content-Type':'application/json'},body:JSON.stringify(recovery)})));
+  assert.deepEqual(races.map(r=>r.status).sort(),[200,409]);
+  assert.notEqual(await redis('HGET',key,'sid'),sid);
+  assert.equal(await redis('HGET',key,'used'),'1000');
+  assert.equal(await redis('HGET',key,'exp'),String(first.session.expiresAt));
+  assert.equal(await redis('HGET',key,'country'),'de');
+  await sleep(1500);assert.equal(connection.closed,true,'revision change retires the old transport');
+} finally {await connection.close();}
+const rotatedSid=await redis('HGET',key,'sid');
+const fresh=await api('session/tickets',{method:'POST',credential});
+const restored=await Wisp.connect(fresh.ticket);
+try {assert.equal((await restored.json()).sid,rotatedSid);} finally {await restored.close();}
+revision=fresh.revision;
+await api('session/recover',{method:'POST',credential,body:{...recovery,revision,reason:'websocket'}});
+assert.equal(await redis('HGET',key,'sid'),rotatedSid,'WebSocket reconnect preserves assignment');
+await api('session/recover',{method:'POST',credential,body:{...recovery,revision:revision+1,reason:'websocket'},expected:409});
+await redis('HSET',key,'used',String(first.session.byteLimit));
+await api('session/recover',{method:'POST',credential,body:{...recovery,revision:revision+1},expected:410});
+await redis('HSET',key,'used','1000','stopped','1');
+await api('session/recover',{method:'POST',credential,body:{...recovery,revision:revision+1},expected:410});
+await redis('HSET',key,'stopped','0','exp',String(Date.now()-1));
+await api('session/recover',{method:'POST',credential,body:{...recovery,revision:revision+1},expected:410});
+console.log('PASS recovery: gateway-attested SID rotation, WebSocket assignment retention, concurrent/stale rejection, two-attempt budget, country/expiry/quota preservation, stopped/expired/exhausted denial');
 const sdk=await fetch(base+'/sdk/v1/shifter-web-proxy.js');assert.equal(sdk.status,200);assert.match(sdk.headers.get('cache-control'),/no-cache/);
 const release=await fetch(base+'/sdk/releases/1.0.0/client.js');assert.equal(release.status,200);assert.match(release.headers.get('cache-control'),/immutable/);
 assert.ok(!(await fetch(base+'/')).headers.has('cross-origin-embedder-policy'));

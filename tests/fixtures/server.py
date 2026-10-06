@@ -29,6 +29,8 @@ async def handle(reader, writer):
         elif kind == 3: address = await reader.readexactly((await reader.readexactly(1))[0])
         else: return
         port = int.from_bytes(await reader.readexactly(2), 'big')
+        if address == bytes([203, 0, 113, 11]):
+            writer.write(b'\x05\x04\x00\x01\x00\x00\x00\x00\x00\x00'); await writer.drain(); return
         writer.write(b'\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00'); await writer.drain()
         head = (await reader.readuntil(b'\r\n\r\n')).decode('latin1')
         lines=head.split('\r\n'); method, path, _=lines[0].split(' ',2)

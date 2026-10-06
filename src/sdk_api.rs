@@ -148,6 +148,13 @@ struct Start {
 struct Selection {
     country: String,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Recovery {
+    revision: u64,
+    url: String,
+    reason: String,
+}
 fn country(value: &str) -> Result<()> {
     if !valid_country(value) {
         return Err(Error(
@@ -176,6 +183,7 @@ pub fn router(s: &State) -> Router<State> {
         .route("/api/v1/session", get(current).delete(stop))
         .route("/api/v1/session/tickets", post(ticket))
         .route("/api/v1/session/reconnect", post(reconnect))
+        .route("/api/v1/session/recover", post(recover))
         .route("/api/v1/session/country", post(change))
         .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(cors)
@@ -300,7 +308,7 @@ async fn ticket(AppState(s): AppState<State>, h: HeaderMap) -> Result<Json<Value
     let current = session(&h, &s).await?;
     active(&current)?;
     Ok(Json(
-        json!({"ticket":s.store.ticket(&current).await.map_err(storage)?,"expiresIn":30,"runtimeOrigin":s.cfg.runtime_origin}),
+        json!({"ticket":s.store.ticket(&current).await.map_err(storage)?,"revision":current.revision,"expiresIn":30,"runtimeOrigin":s.cfg.runtime_origin}),
     ))
 }
 async fn reconnect(AppState(s): AppState<State>, h: HeaderMap) -> Result<Json<Value>> {
@@ -308,6 +316,54 @@ async fn reconnect(AppState(s): AppState<State>, h: HeaderMap) -> Result<Json<Va
     active(&current)?;
     s.store.reconnect(&current).await.map_err(storage)?;
     Ok(Json(json!({"status":"reconnecting"})))
+}
+async fn recover(
+    AppState(s): AppState<State>,
+    h: HeaderMap,
+    input: std::result::Result<Json<Recovery>, JsonRejection>,
+) -> Result<Json<Value>> {
+    let current = session(&h, &s).await?;
+    active(&current)?;
+    let Json(input) = input.map_err(bad_input)?;
+    let url = url::Url::parse(&input.url).ok().filter(|u| {
+        matches!(u.scheme(), "http" | "https")
+            && u.host_str().is_some()
+            && u.username().is_empty()
+            && u.password().is_none()
+            && matches!(u.port_or_known_default(), Some(80 | 443))
+    });
+    let Some(url) = url else {
+        return Err(Error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_INPUT",
+            "Invalid recovery request",
+        ));
+    };
+    if !matches!(input.reason.as_str(), "websocket" | "upstream") {
+        return Err(Error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_INPUT",
+            "Invalid recovery request",
+        ));
+    }
+    if !s
+        .store
+        .recover(
+            &current,
+            input.revision,
+            url.host_str().unwrap(),
+            input.reason == "upstream",
+        )
+        .await
+        .map_err(storage)?
+    {
+        return Err(Error(
+            StatusCode::CONFLICT,
+            "RECOVERY_UNAVAILABLE",
+            "The connection could not be restored. Please try again.",
+        ));
+    }
+    Ok(Json(json!({"status":"reconnecting","retryAfterMs":6500})))
 }
 async fn change(
     AppState(s): AppState<State>,

@@ -42,6 +42,7 @@ test('runtime reports document loads, ignores anchors/cancelled navigation and r
     constructor() {
       super();
       this.frame = new EventTarget();
+      this.frame.style = {};
       this.frame.setAttribute = () => {};
       this.frame.remove = () => {};
       this.frame.contentWindow = new EventTarget();

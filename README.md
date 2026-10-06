@@ -93,6 +93,16 @@ State status is `idle`, `initializing`, `ready`, `verifying`, `connecting`, `bro
 
 The default API origin is the loader's origin. `apiOrigin` is an optional local-integration override. `nonce` can be supplied for CSP-authorized injected scripts/styles; the loader inherits its script nonce by default. Neither option changes server authorization.
 
+### Automatic connection recovery
+
+SDK 1.0.2 silently retries a failed GET document navigation at most twice, keeping `loading: true` and the website's branded overlay visible. Backoffs are 300 and 600 milliseconds; each reconnect waits 6.5 seconds for the previous gateway lease to retire before requesting a fresh one-use ticket. Stop, a new SDK operation, destruction, or expiry cancels queued recovery. After the retry budget is exhausted, the SDK displays a friendly connection message instead of Scramjet's technical error page.
+
+A thrown WebSocket connection failure reconnects with the existing SID. A transient SOCKS connection failure can rotate the SID only when the active gateway has recorded that failure for the requested hostname and session revision. Rotation preserves country, region, expiry, used bytes, and byte limit. The atomic Redis operation rejects stale/concurrent recovery, inactive sessions, and more than two recoveries in a 30-second window. The old lease is never cleared early. Redis failures deny recovery.
+
+Website HTTP errors, CAPTCHAs, and login pages are normal responses and pass through unchanged. Failed POST/PUT submissions, engine errors, destination policy/DNS rejection, explicit upstream authentication rejection, and exhausted/expired authorization are not automatically replayed. Recovery applies to failed document loads, not arbitrary background requests or embedded widgets. Changing a residential SID may affect a destination's IP-bound login or session.
+
+The runtime replaces failed document responses with a neutral placeholder before they reach the screen. A short-lived, one-use capability held by the service worker lets the trusted runtime retrieve the actual request method and failure classification; destination HTML and untrusted window messages cannot manufacture that classification. Existing SDK releases receive a friendly error, while 1.0.2 negotiates automatic recovery over the existing v1 protocol. Reloading a website using the stable hosted SDK loader picks up the update after deployment; site adapters render `state.loading` directly, without a second loading timeout that could reveal a recovery in progress.
+
 ### CAPTCHA configuration
 
 Register both website domains on the existing standard v2 checkbox key. The **site key is public**, including in GitHub. The **secret is private** and must never enter SDK code, HTML, URLs, repository files, or logs. Set `RECAPTCHA_SITE_KEY` and mount `RECAPTCHA_SECRET_FILE` only in the API container. The API needs outbound HTTPS to Google's fixed SiteVerify endpoint. Google responses must be successful, free of error codes, and match the exact caller hostname. Google enforces the response token's two-minute lifetime; the returned challenge timestamp is validated as a load timestamp, not mistaken for when the user solved it. A SHA-256 token reservation in Redis rejects concurrent replay; raw CAPTCHA responses are not stored. See [Google verification](https://developers.google.com/recaptcha/docs/verify).
@@ -105,9 +115,9 @@ Production startup rejects missing credentials and Google's public test credenti
 
 ### Release and rollback
 
-Maintain source only under `web/sdk/src/`. `node scripts/build-sdk.mjs 1.0.1` creates/verifies immutable files and a SHA-256 manifest in `web/sdk/releases/1.0.1/`. With no argument, the script verifies the release selected by the loader. It rejects changed content for an existing version. To release an update, pass a new semantic version and change `RELEASE` in `web/sdk/v1/shifter-web-proxy.js` after validating that release.
+Maintain source only under `web/sdk/src/`. `node scripts/build-sdk.mjs 1.0.2` creates/verifies immutable files and a SHA-256 manifest in `web/sdk/releases/1.0.2/`. With no argument, the script verifies the release selected by the loader. It rejects changed content for an existing version. To release an update, pass a new semantic version and change `RELEASE` in `web/sdk/v1/shifter-web-proxy.js` after validating that release.
 
-The loader uses `Cache-Control: public, no-cache`; release assets use a one-year immutable cache. Each page imports one fixed release. Rollback changes the loader's release target; existing page instances keep their release until reloaded. Retain old release directories. v1 releases must preserve protocol 1 so the runtime supports the current and previous SDK release; introduce `/sdk/v2/` for a breaking contract. Release 1.0.1 preserves CAPTCHA error frames and adds explicit retry; 1.0.0 is retained for rollback.
+The loader uses `Cache-Control: public, no-cache`; release assets use a one-year immutable cache. Each page imports one fixed release. Rollback changes the loader's release target; existing page instances keep their release until reloaded. Retain old release directories. v1 releases must preserve protocol 1 so the runtime supports the current and previous SDK release; introduce `/sdk/v2/` for a breaking contract. Release 1.0.2 adds bounded proxy recovery. Releases 1.0.1 (CAPTCHA error-frame handling) and 1.0.0 remain available for rollback.
 
 Deploy the API and assets before changing website adapters, and disable the old production session creation at that cutover. Old cookie sessions are not imported: visitors complete a fresh CAPTCHA for a new origin-scoped identity. Update Redis ACLs before deploying; missing permissions fail closed.
 
@@ -458,14 +468,15 @@ All SDK API calls use `/api/v1`. Send the embedding site's exact `Origin`; authe
 | `GET /api/v1/config` | None | Countries, site ID, runtime origin, public CAPTCHA site key, protocol version |
 | `POST /api/v1/sessions` | `{country, captchaToken}` | `{session, credential}`; credential returned only for a new identity |
 | `GET /api/v1/session` | None | Current allowance and status |
-| `POST /api/v1/session/tickets` | None | One-use ticket, 30-second TTL, runtime origin |
+| `POST /api/v1/session/tickets` | None | One-use ticket, session revision, 30-second TTL, runtime origin |
 | `POST /api/v1/session/country` | `{country}` | Updated assignment; allowance retained |
 | `POST /api/v1/session/reconnect` | None | Old connection revision revoked |
+| `POST /api/v1/session/recover` | `{revision, url, reason}` | Bounded recovery; reason is `websocket` or `upstream`; returns `{status, retryAfterMs}` |
 | `DELETE /api/v1/session` | None | Stopped access |
 
 Public session fields are `country`, `status`, `serverTime`, `expiresAt`, `remainingBytes`, `byteLimit`, and `connected`. Times are Unix milliseconds; upstream credentials/SID are private. Session status is `active`, `stopped`, `expired`, or `exhausted`.
 
-Error responses use `{code, error}`. Codes include `ORIGIN_DENIED`, `AUTH_REQUIRED`, `NO_SESSION`, `INVALID_INPUT`, `INVALID_COUNTRY`, `CAPTCHA_REQUIRED`, `CAPTCHA_REJECTED`, `CAPTCHA_UNAVAILABLE`, `SESSION_ENDED`, and `STORAGE_UNAVAILABLE`. Verification failures never silently mint another credential. An invalid saved credential returns 401; the SDK discards it and the visitor retries Search with a new challenge.
+Error responses use `{code, error}`. Codes include `ORIGIN_DENIED`, `AUTH_REQUIRED`, `NO_SESSION`, `INVALID_INPUT`, `INVALID_COUNTRY`, `CAPTCHA_REQUIRED`, `CAPTCHA_REJECTED`, `CAPTCHA_UNAVAILABLE`, `SESSION_ENDED`, `RECOVERY_UNAVAILABLE`, and `STORAGE_UNAVAILABLE`. Verification failures never silently mint another credential. An invalid saved credential returns 401; the SDK discards it and the visitor retries Search with a new challenge.
 
 The runtime keeps `/wisp/?ticket=...` and `/wisp/<ticket>/` WebSocket routes. Only its exact Origin can redeem tickets. Forged/reused/expired tickets, unavailable sessions, ownership conflicts, regional mismatches, and Redis failures deny access. `/settings` exposes only allowed parent origins and protocol versions. `/health` and `/metrics` stay internal at the production ingress.
 
@@ -499,7 +510,7 @@ The destination policy rejects private/reserved IPv4/IPv6 ranges, loopback, link
 
 The destination’s original TLS hostname remains available to the browser transport. The live Node TLS smoke test separately checked opaque TLS forwarding with hostname/certificate verification enabled; it does not validate production frontend certificates or browser-wide compatibility.
 
-The reserved `fixture.test` and `second.test` mappings exist only in test mode. The synthetic SOCKS server serves fixture responses without opening destination Internet connections.
+The reserved `fixture.test`, `second.test`, and `failed-upstream.test` mappings exist only in test mode. The synthetic SOCKS server serves fixture responses or a deliberate SOCKS failure without opening destination Internet connections.
 
 ## HAProxy, regions, and recovery
 
@@ -507,7 +518,7 @@ Local HAProxy runs in TCP mode; the production example terminates HTTPS in HTTP 
 
 **HAProxy balances connections, not individual requests inside a Wisp connection.** An established WebSocket remains attached to one replica. Independent visitors and later reconnects may select different replicas.
 
-If a replica stops, in-flight requests fail. The browser must explicitly reconnect; the surviving replica reads shared Redis state and preserves the session’s country, SID, region, and remaining allowance. A crashed replica’s lease may take up to six seconds to expire, in addition to health-check/routing recovery time.
+If a replica stops, in-flight requests can fail. SDK 1.0.2 automatically reconnects eligible failed GET document loads within its retry budget; unsafe submissions and exhausted retries require user action. The surviving replica reads shared Redis state and preserves the session’s country, SID, region, and remaining allowance. A crashed replica’s lease may take up to six seconds to expire, in addition to health-check/routing recovery time.
 
 The production design should place a regional HAProxy in front of healthy replicas in that same region. Each replica should use the corresponding explicit Shifter regional hostname. Geographic/latency-aware DNS can select a nearby healthy ingress region; it cannot guarantee the nearest server for every visitor.
 
@@ -611,6 +622,8 @@ HTTPS_TEST_IMAGE=shifter-web:sdk-check HTTPS_TEST_REDIS_TLS=1 node tests/https-d
 ```
 
 The SDK runner creates a separate disposable local project on loopback ports 8180/8181, runs the origin/CAPTCHA/identity/cache checks, existing transport/quota integration tests, and Redis network-policy checks, then removes that project. It never rewrites the developer's active configuration. `--keep` retains it for browser checks and writes its cleanup context under ignored `artifacts/`.
+
+Recovery tests cover hidden error documents, worker capability validation, website HTTP-error passthrough, POST safety, stale frames, retry limits, Stop/destruction cancellation, gateway-attested SID rotation, concurrent recovery, and unchanged quota/expiry. The TLS fixture also exercises recovery under the production Redis ACL and verifies that storage loss denies recovery. Automated runtime tests use a simulated DOM/service-worker bridge; a real-browser recovery acceptance run remains necessary.
 
 Unit tests cover modal cancellation, concurrent clicks, errors, bearer requests, stale messages, storage denial, cleanup, and Google challenge focus handling. The TLS fixture seeds a verified synthetic identity directly in its private Redis for WSS testing; it does not claim to solve a real CAPTCHA or expose a production bypass. Real credentials are never used by synthetic tests. Local browser checks exercised the branded and minimal UIs on different local site origins, mobile and desktop browsing, cancellation, and Stop/cleanup. Google’s live widget script was unavailable in that browser session; synthetic verification was used for successful session flows. Real Google challenge acceptance on the two production websites remains outstanding.
 
