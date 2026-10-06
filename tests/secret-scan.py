@@ -1,4 +1,4 @@
-"""Check this prototype's deliverables and container logs without printing credentials."""
+"""Check the project's deliverables and container logs without printing credentials."""
 import json, os, pathlib, shlex, subprocess, sys, tomllib
 root = pathlib.Path(__file__).resolve().parents[1]
 os.chdir(root)

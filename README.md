@@ -1,10 +1,10 @@
 # Shifter Web Proxy
 
-A local web proxy prototype that combines **Scramjet in the browser**, **HAProxy in TCP mode**, **Rust Wisp gateways**, **Redis session enforcement**, and **Shifter residential proxies**.
+A web proxy that combines **Scramjet in the browser**, **HAProxy in TCP mode**, **Rust Wisp gateways**, **Redis session enforcement**, and **Shifter residential proxies**.
 
 Visitors enter a website, choose an exit country, and browse inside the page without configuring their browser’s proxy settings. Each visitor receives a server-generated sticky session ID. The gateway adds the upstream credentials and country targeting on the server.
 
-**Status: local development prototype. Backend validation passed; final browser acceptance is incomplete.** Earlier browser runs experienced Wisp disconnections after navigation or idle. A WebSocket keepalive was added, but its final browser regression and the complete cookie-cleanup sequence remain unverified. This is not a production-ready public proxy.
+**Status: local deployment. Backend validation passed; final browser acceptance is incomplete.** Earlier browser runs experienced Wisp disconnections after navigation or idle. A WebSocket keepalive was added, but its final browser regression and the complete cookie-cleanup sequence remain unverified. This is not a production-ready public proxy.
 
 An offline HTML version of this README is included at [docs/readme.html](docs/readme.html).
 
@@ -243,7 +243,7 @@ Production requirements:
 - Keep credentials, ACL material, certificates, private keys, and actual regional configuration in secret storage or ignored local files. Do not log authenticated Redis URLs.
 - Continue failing closed when authorization or quota storage is unavailable.
 
-The local prototype deliberately uses unauthenticated, non-TLS Redis **only inside its isolated Docker state network**. Production remains disabled. The current Rust Redis dependency/configuration is not a ready-made production TLS/ACL integration; implement and validate it before production is enabled. Network isolation alone must not be described as complete production hardening.
+The local configuration uses unauthenticated, non-TLS Redis **only inside its isolated Docker state network**. Production remains disabled. The current Rust Redis dependency/configuration is not a ready-made production TLS/ACL integration; implement and validate it before production is enabled. Network isolation alone must not be described as complete production hardening.
 
 Run the policy rejection checks and the deployed-container checks after networking changes:
 
@@ -379,7 +379,7 @@ If a replica stops, in-flight requests fail. The browser must explicitly reconne
 
 The production design should place a regional HAProxy in front of healthy replicas in that same region. Each replica should use the corresponding explicit Shifter regional hostname. Geographic/latency-aware DNS can select a nearby healthy ingress region; it cannot guarantee the nearest server for every visitor.
 
-This prototype binds sessions to their assigned region and rejects a region mismatch. Cross-region recovery that preserves allowance while creating a fresh residential assignment is not implemented. It must not silently promise IP continuity across regions.
+The gateway binds sessions to their assigned region and rejects a region mismatch. Cross-region recovery that preserves allowance while creating a fresh residential assignment is not implemented. It must not silently promise IP continuity across regions.
 
 ## Testing and validation
 
@@ -522,7 +522,7 @@ The runtime listener balances independent HTTP connections as well as WebSocket 
 | Browser loses the connection or a website fails | This remains an open compatibility/regression area. Use explicit Reload; do not automatically replay form submissions. |
 | Template changes do not appear locally | Bootstrap preserves local copies. Compare the example with the ignored local file and apply the change yourself. |
 
-Redis uses an AOF-backed named volume and a no-eviction memory policy in the example. `stack.sh down` preserves that volume. Deleting it removes the local allowance ledger. Redis high availability, backup/restore policy, crash-durability guarantees, and production observability are outside this prototype.
+Redis uses an AOF-backed named volume and a no-eviction memory policy in the example. `stack.sh down` preserves that volume. Deleting it removes the local allowance ledger. Redis high availability, backup/restore policy, crash-durability guarantees, and production observability remain deployment work.
 
 The development cookie is not a public anti-abuse control. `APP_ENV=production` is deliberately rejected instead of silently using that identity mode.
 
