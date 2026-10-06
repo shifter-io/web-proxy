@@ -3,7 +3,7 @@
   if (window.ShifterWebProxy) return;
   const script = document.currentScript;
   const base = new URL(script.src);
-  const RELEASE = '1.0.2';
+  const RELEASE = '1.0.3';
   const implementation = import(new URL(`../releases/${RELEASE}/client.js`, base));
   window.ShifterWebProxy = Object.freeze({
     version: RELEASE,

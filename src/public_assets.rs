@@ -68,6 +68,7 @@ fn public_path(kind: Kind, path: &str) -> Option<&str> {
                 | "runtime.js"
                 | "bridge.js"
                 | "sw.js"
+                | "transport-compat.js"
                 | "reset.html"
                 | "reset.js"
                 | "vendor/scram/scramjet.all.js"

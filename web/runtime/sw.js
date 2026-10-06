@@ -1,6 +1,7 @@
-importScripts('/vendor/scram/scramjet.all.js');
+importScripts('/vendor/scram/scramjet.all.js', '/transport-compat.js');
 const { ScramjetServiceWorker } = $scramjetLoadWorker();
 const scramjet = new ScramjetServiceWorker();
+installRequestBodyCompatibility(scramjet.client);
 // Failure capabilities stay in the worker. A destination cannot trigger recovery
 // by displaying an error-looking page or fabricating a postMessage.
 const failures = new Map();
@@ -27,7 +28,10 @@ self.addEventListener('fetch', event => {
   event.respondWith((async () => {
     // Runtime/reset assets must remain reachable after reset clears the engine DB.
     const url = new URL(event.request.url);
-    if (url.origin !== self.location.origin || !url.pathname.startsWith('/service/')) return fetch(event.request);
+    // v1 injects the WASM URL as a script and serves a JavaScript wrapper for it.
+    // Passing that script straight to the static server breaks destination JS.
+    const wasmScript = url.pathname === '/vendor/scram/scramjet.wasm.wasm' && event.request.destination === 'script';
+    if (url.origin !== self.location.origin || (!url.pathname.startsWith('/service/') && !wasmScript)) return fetch(event.request);
     await scramjet.loadConfig();
     if (!scramjet.route(event)) return fetch(event.request);
     if (event.request.mode !== 'navigate') return scramjet.fetch(event);

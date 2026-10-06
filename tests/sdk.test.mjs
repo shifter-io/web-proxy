@@ -184,7 +184,7 @@ test('service worker can load reset assets even when engine configuration is una
   const source=await readFile(new URL('../web/runtime/sw.js',import.meta.url),'utf8');
   const listeners={};let loads=0;
   const worker={location:{origin:'https://runtime.test'},addEventListener:(name,fn)=>listeners[name]=fn};
-  runInNewContext(source,{self:worker,URL,importScripts(){},$scramjetLoadWorker:()=>({ScramjetServiceWorker:class{loadConfig(){loads++;return new Promise(()=>{});}}}),fetch:async request=>({url:request.url})});
+  runInNewContext(source,{self:worker,URL,importScripts(){},installRequestBodyCompatibility(){},$scramjetLoadWorker:()=>({ScramjetServiceWorker:class{loadConfig(){loads++;return new Promise(()=>{});}}}),fetch:async request=>({url:request.url})});
   let result;
   listeners.fetch({request:{url:'https://runtime.test/reset.html'},respondWith:response=>result=response});
   assert.equal((await result).url,'https://runtime.test/reset.html');assert.equal(loads,0);
@@ -269,7 +269,7 @@ test('server authorization/quota/storage refusal never loops or exposes technica
   t.mock.method(globalThis,'fetch',async(url,options)=>url.endsWith('/recover')?{ok:false,status:503,json:async()=>({code:'STORAGE_UNAVAILABLE',error:'internal Redis trace'})}:originalFetch(url,options));
   e.fail();await e.advance(300);await e.advance(10000);
   assert.equal(e.sent.filter(d=>d.command==='reconnect').length,0);
-  assert.equal(e.proxy.getState().status,'interrupted');assert.doesNotMatch(e.proxy.getState().error.message,/Redis|trace/);
+  assert.equal(e.proxy.getState().status,'interrupted');assert.equal(e.proxy.getState().error,null);
 });
 
 test('Stop during the retired-lease wait cancels the pending replacement ticket',async t=>{
@@ -295,4 +295,77 @@ test('quota exhaustion during recovery retains the exhausted state and clears th
   assert.equal(e.proxy.getState().status,'exhausted');assert.equal(e.proxy.getState().active,false);
   e.runtimeMessage('cleared');await flush();
   assert.equal(e.sent.filter(d=>d.command==='reconnect').length,0);
+});
+
+test('slow page releases its overlay without a timeout notice',async t=>{
+  const e=await recoveryEnvironment(t);
+  await e.advance(25000);
+  assert.equal(e.proxy.getState().loading,false);assert.equal(e.proxy.getState().error,null);
+});
+
+test('background API failure retries quietly and preserves the loaded destination and SID',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','setInterval','Date']});
+  const e=environment(t);await e.start();e.runtimeMessage('ready');await flush();e.runtimeMessage('loaded');
+  const before=e.proxy.getState(), original=globalThis.fetch, states=[];
+  let reads=0, offline=true;
+  e.proxy.subscribe(s=>states.push(s));
+  t.mock.method(globalThis,'fetch',async(url,options)=>{
+    if(url.endsWith('/session')){reads++;if(offline)throw new TypeError('Failed to fetch');}
+    return original(url,options);
+  });
+  for(const ms of [1500,500,1000]){t.mock.timers.tick(ms);await flush();}
+  assert.equal(reads,3);assert.ok(states.every(s=>s.error===null));
+  assert.equal(e.proxy.getState().status,'browsing');assert.deepEqual(e.proxy.getState().session,before.session);
+  t.mock.timers.tick(1500);await flush();assert.equal(reads,3,'status polling backs off after failure');
+  offline=false;t.mock.timers.tick(3000);await flush();assert.equal(reads,4);
+  assert.ok(!e.requests.some(r=>r.url.endsWith('/recover')||r.url.endsWith('/reconnect')),'polling never resets Google or rotates SID');
+});
+
+test('gateway 502 API reads retry before initialization succeeds',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const e=environment(t), original=globalThis.fetch;let calls=0;
+  t.mock.method(globalThis,'fetch',async(url,options)=>{
+    if(url.endsWith('/config')&&++calls<3)return {ok:false,status:502,json:async()=>{throw new Error('HTML gateway response');}};
+    return original(url,options);
+  });
+  const init=e.proxy.init();await flush();
+  t.mock.timers.tick(500);await flush();t.mock.timers.tick(1000);await init;
+  assert.equal(calls,3);assert.equal(e.proxy.getState().error,null);
+});
+
+test('destroy cancels queued API retries',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const e=environment(t);let calls=0;
+  t.mock.method(globalThis,'fetch',async()=>{calls++;throw new TypeError('Failed to fetch');});
+  const init=e.proxy.init();await flush();e.proxy.destroy();
+  await assert.rejects(init);t.mock.timers.tick(5000);await flush();assert.equal(calls,1);
+});
+
+test('explicit storage refusal is not retried as an API network failure',async t=>{
+  const e=environment(t);let calls=0;
+  t.mock.method(globalThis,'fetch',async()=>{calls++;return {ok:false,status:503,json:async()=>({code:'STORAGE_UNAVAILABLE',error:'Service unavailable'})};});
+  await assert.rejects(e.proxy.init(),{code:'STORAGE_UNAVAILABLE'});assert.equal(calls,1);
+});
+
+test('ticket network failure retries silently before starting the destination once',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const e=environment(t);await e.start();
+  const original=globalThis.fetch,sent=[];let tickets=0;
+  document.querySelector('iframe').contentWindow.postMessage=data=>sent.push(data);
+  t.mock.method(globalThis,'fetch',async(url,options)=>{
+    if(url.endsWith('/tickets')&&++tickets<3)throw new TypeError('Failed to fetch');
+    return original(url,options);
+  });
+  e.runtimeMessage('ready');await flush();t.mock.timers.tick(500);await flush();t.mock.timers.tick(1000);await flush();
+  assert.equal(tickets,3);assert.equal(sent.length,1);assert.equal(sent[0].command,'start');assert.equal(e.proxy.getState().error,null);
+});
+
+test('ambiguous mutating API failure never repeats the request or exposes a raw banner',async t=>{
+  const e=await recoveryEnvironment(t),original=globalThis.fetch;let changes=0;
+  t.mock.method(globalThis,'fetch',async(url,options)=>{
+    if(url.endsWith('/country')){changes++;throw new TypeError('Failed to fetch');}
+    return original(url,options);
+  });
+  await e.proxy.changeCountry('de');await e.advance(10000);
+  assert.equal(changes,1);assert.equal(e.proxy.getState().error,null);assert.equal(e.proxy.getState().status,'interrupted');
 });

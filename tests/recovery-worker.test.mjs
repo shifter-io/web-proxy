@@ -23,7 +23,7 @@ function worker() {
       } catch {return new Response('Uh oh! Raw diagnostic stack',{status:500});}
     }
   }
-  runInNewContext(source,{self:{location:{origin:'https://runtime.test'},addEventListener:(name,fn)=>listeners[name]=fn},URL,Response,Proxy,Date,crypto:{randomUUID},importScripts(){},$scramjetLoadWorker:()=>({ScramjetServiceWorker:Engine})});
+  runInNewContext(source,{self:{location:{origin:'https://runtime.test'},addEventListener:(name,fn)=>listeners[name]=fn},URL,Response,Proxy,Date,crypto:{randomUUID},importScripts(){},installRequestBodyCompatibility(){},$scramjetLoadWorker:()=>({ScramjetServiceWorker:Engine})});
   return {
     async fetch(path,method='GET',mode='navigate') {
       let response;listeners.fetch({request:{url:'https://runtime.test/service/'+path,method,mode},respondWith:r=>{response=r;}});return response;
@@ -49,4 +49,21 @@ test('worker carries the actual POST method and ignores subresource failures',as
   const w=worker(),response=await w.fetch('websocket','POST');
   const id=(await response.text()).match(/data-id="([^"]+)"/)[1];assert.equal(w.lookup(id).method,'POST');
   assert.match(await (await w.fetch('upstream','GET','cors')).text(),/Raw diagnostic/,'only document navigation is eligible');
+});
+
+test('injected WASM script uses Scramjet wrapper while raw WASM/reset assets bypass configuration',async()=>{
+  const listeners={}, seen=[];
+  class Engine {
+    async loadConfig(){seen.push('config');}
+    route(){return true;}
+    async fetch(event){seen.push(event.request.url);return new Response('self.WASM = "fixture"',{headers:{'Content-Type':'text/javascript'}});}
+  }
+  runInNewContext(source,{self:{location:{origin:'https://runtime.test'},addEventListener:(name,fn)=>listeners[name]=fn},URL,Response,importScripts(){},installRequestBodyCompatibility(){},$scramjetLoadWorker:()=>({ScramjetServiceWorker:Engine}),fetch:async()=>new Response('static')});
+  async function get(path,destination){let response;listeners.fetch({request:{url:'https://runtime.test'+path,destination,mode:'no-cors'},respondWith:r=>response=r});return response;}
+  const response=await get('/vendor/scram/scramjet.wasm.wasm','script');
+  assert.match(response.headers.get('content-type'),/javascript/);
+  assert.match(await response.text(),/self.WASM/);
+  assert.equal(seen.length,2);
+  for(const [path,dest] of [['/vendor/scram/scramjet.wasm.wasm',''],['/reset.html','document']]) assert.equal(await (await get(path,dest)).text(),'static');
+  assert.equal(seen.length,2,'reset and raw WASM must not depend on engine configuration');
 });
