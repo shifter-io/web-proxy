@@ -3,6 +3,7 @@ name: shifter-web
 x-app: &app
   build: .
   image: shifter-web:local
+  networks: [default, session_state]
   init: true
   restart: "no"
   read_only: true
@@ -46,6 +47,8 @@ services:
     ulimits:
       nofile: {soft: 65536, hard: 65536}
   redis:
+    # Private state network only: no ports, host networking, or public routing.
+    networks: [session_state]
     image: redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
     command: [redis-server, --appendonly, "yes", --maxmemory, 256mb, --maxmemory-policy, noeviction]
     volumes: [redis-data:/data]
@@ -79,3 +82,12 @@ secrets:
     file: ${SHIFTER_CREDENTIALS_FILE:?Set SHIFTER_CREDENTIALS_FILE in .env to the existing TOML secrets file}
 volumes:
   redis-data:
+
+networks:
+  default: {}
+  session_state:
+    internal: true
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
+      com.docker.network.bridge.gateway_mode_ipv6: isolated

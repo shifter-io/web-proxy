@@ -17,6 +17,7 @@ An offline HTML version of this README is included at [docs/readme.html](docs/re
 - [Quick start with synthetic traffic](#quick-start-with-synthetic-traffic)
 - [Using a real Shifter account](#using-a-real-shifter-account)
 - [Configuration reference](#configuration-reference)
+- [Redis security rules](#redis-security-rules)
 - [Session lifecycle and limits](#session-lifecycle-and-limits)
 - [Browser integration and isolation](#browser-integration-and-isolation)
 - [API reference](#api-reference)
@@ -98,7 +99,7 @@ Never put a real password in a template, a command-line argument, a Docker build
 
 ## Requirements
 
-- Docker with the Compose plugin, a running local Docker engine, and support for BuildKit cache mounts.
+- Docker with the Compose plugin, a running local Docker engine, support for BuildKit cache mounts and bridge gateway mode `isolated` (validated locally with Engine 29.4.0).
 - A browser with service workers, SharedWorkers, and WebAssembly support. Browser compatibility beyond the observed local fixture flows is not established.
 - Node.js 24 when running the host-side test scripts or vendoring assets outside Docker.
 - Rust/Cargo compatible with Rust 1.94.1 when running host-side Rust checks. The Docker build includes the pinned toolchain.
@@ -220,6 +221,40 @@ These advanced settings are set in the local Compose environment or supplied whe
 Supported country codes are `us`, `gb`, `de`, `fr`, `ca`, `au`, `sg`, and `in`. The interface defaults to the United States. Missing or unlisted countries are rejected; country targeting is never silently omitted.
 
 The regional allowlist is `fra`, `ams`, `lon`, `nyc`, `tor`, `sgp`, `blr`, and `syd`. Only the BLR upstream was exercised in the initial live validation.
+
+## Redis security rules
+
+**Redis must run exclusively on private network addresses in every region. Public Redis endpoints and published Redis ports are prohibited.** This applies to primary/replica instances, Sentinel, and cluster management ports.
+
+The permanent project rule is [Redis security rule](.cursor/rules/redis-security.mdc), referenced by [AGENTS.md](AGENTS.md). It applies to application, infrastructure, example configuration, and operational changes.
+
+The local Compose example attaches Redis only to `session_state`, a bridge network with `internal: true` and `isolated` gateway mode for IPv4 and IPv6. The API and both gateways join that network and the separate default network. HAProxy and the synthetic destination stay off the state network. Redis publishes no host port, including loopback port mappings. Its `6379/tcp` image metadata in `docker compose ps` is not a published host listener; any `HOST:PORT->6379` mapping would violate the rule. Docker host administrators retain privileged access to container networks; this isolation does not defend against a compromised host or Docker administrator.
+
+The explicit bridge mode is required: on the development device, `internal: true` alone still allowed a direct connection from HAProxy to Redis. With `isolated` mode, the deployed-container check confirms that the API and both gateways can use Redis while HAProxy cannot connect to its private port. Run this check on each deployment engine; do not remove the isolation options to work around an unsupported engine.
+
+For an existing checkout, `scripts/configure.sh` preserves local files. Merge the network changes from `compose.example.yaml` into your ignored `compose.yaml`, then recreate this project’s containers and networks with `docker compose down` followed by your usual stack start command. Do not pass `--volumes`: the Redis data volume must survive. This interrupts active local browsing connections.
+
+Production requirements:
+
+- Private IPs and private DNS only; no public IP, public load balancer, public DNS endpoint, NAT/port forwarding, or host-network shortcut for Redis.
+- Bind Redis only to private interfaces and necessary loopback addresses. Firewall/security groups deny access by default, allowing the regional API/gateways and explicitly approved private administration, monitoring, and replication peers.
+- Require named ACL users with least-privilege key and command permissions; disable unauthenticated default access. Keep protected mode enabled.
+- Require TLS with certificate and hostname verification for client and replication connections. Authentication complements private networking; it does not replace it.
+- Keep credentials, ACL material, certificates, private keys, and actual regional configuration in secret storage or ignored local files. Do not log authenticated Redis URLs.
+- Continue failing closed when authorization or quota storage is unavailable.
+
+The local prototype deliberately uses unauthenticated, non-TLS Redis **only inside its isolated Docker state network**. Production remains disabled. The current Rust Redis dependency/configuration is not a ready-made production TLS/ACL integration; implement and validate it before production is enabled. Network isolation alone must not be described as complete production hardening.
+
+Run the policy rejection checks and the deployed-container checks after networking changes:
+
+```sh
+node --test tests/redis-network-policy.test.mjs
+node tests/configuration.mjs
+```
+
+The configuration check rejects Redis host port mappings, host networking, non-internal networks, missing isolated bridge modes, non-private assigned IPs, and unexpected state-network members. It also confirms application Redis access and requires a direct connection attempt from HAProxy to fail. These are local Docker checks; actual cloud firewall rules, private endpoint settings, ACLs, certificates, and regional replication access require deployment-specific verification.
+
+These requirements follow the [Redis security guidance](https://redis.io/docs/latest/operate/oss_and_stack/management/security/) and [Docker Compose internal network configuration](https://docs.docker.com/reference/compose-file/networks/#internal), and [Docker isolated gateway mode](https://docs.docker.com/engine/network/port-publishing/#gateway-modes).
 
 ## Session lifecycle and limits
 
@@ -370,6 +405,7 @@ node tests/integration.mjs
 node tests/limits.mjs
 node tests/load.mjs
 node tests/failover.mjs
+node --test tests/redis-network-policy.test.mjs
 node tests/configuration.mjs
 cargo test --locked
 cargo clippy --all-targets -- -D warnings
@@ -382,7 +418,8 @@ npm audit --audit-level=high
 | `limits.mjs` | Ticket TTL/expiry, outstanding ticket revocation, unauthorized country changes, sixteen-stream burst, thirty-two-stream concurrency cap |
 | `load.mjs` | 10, 100, 500, and 1,000 simultaneous mock sessions; two 128 KiB requests per session; errors, latency percentiles, throughput, replica counts, sampled Docker CPU/memory |
 | `failover.mjs` | Different countries on one replica, replica failure/recovery with preserved SID/allowance, Redis outage and fail-closed behavior |
-| `configuration.mjs` | Production-mode rejection, read-only gateway secret mounts, loopback-only published listeners |
+| `configuration.mjs` | Production-mode rejection, read-only gateway secret mounts, loopback-only application listeners, private/internal Redis with no published ports, isolated bridge modes, restricted network membership, working application access, and blocked HAProxy access |
+| `redis-network-policy.test.mjs` | Rejection of published Redis ports, host networking, non-internal networks, missing isolated bridge modes, public addresses, and unauthorized network members |
 | Rust unit test | Representative allowed/blocked destination addresses |
 
 Load tests refuse live mode. Failover tests deliberately stop/start gateways and pause/unpause Redis. Use a dedicated local test stack and do not run those tests while using the browsing UI. The scripts restore stopped services in cleanup paths, but inspect the stack after any externally interrupted test.
@@ -567,6 +604,7 @@ This repository does not grant a blanket license for third-party components. Ups
 - Add broader service-level admission controls, operational resource limits, and sustained load testing.
 - Separate trusted Shifter pages and untrusted website content onto different registrable domains; review engine isolation and escape risks.
 - Configure production HTTPS/WSS, transport-origin routing, certificate handling, and secure cookie policy.
+- Enforce the Redis security rules above, including production ACL/TLS support, private endpoints and verified network access restrictions.
 - Establish regional Redis/state availability and an explicit cross-region recovery protocol that preserves allowance but rotates residential assignment.
 - Deploy regional HAProxy/gateway groups and geographic/latency-aware DNS, with health-aware routing.
 - Add production telemetry that protects browsing privacy and excludes credentials, connection tickets, and destination URLs.

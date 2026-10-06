@@ -1,0 +1,38 @@
+---
+description: Mandatory private-network Redis security for every Shifter web-proxy region
+alwaysApply: true
+---
+
+# Redis security
+
+- Redis is private infrastructure in every region. Never assign it a public IP,
+  publish its ports, place it behind a public load balancer, or expose it through
+  public DNS/NAT. This includes replicas, Sentinel, and cluster management ports.
+- Production Redis must listen only on private interfaces and required loopback
+  addresses. Use private DNS/IPs for clients and replication. Firewall/security
+  groups must deny by default and allow only regional API/gateways and explicitly
+  approved private administration, monitoring, and replication peers.
+- In local Docker, Redis must attach only to the internal `session_state` network,
+  using bridge gateway mode `isolated` for IPv4/IPv6, with no host networking
+  and no published ports (including loopback mappings).
+  Only Redis, the API, and Wisp gateways may join that network. HAProxy and test
+  destinations must stay outside it; gateways keep a separate egress network.
+- Production requires named Redis ACL users with least-privilege key/command
+  permissions, no unauthenticated default user, and TLS with certificate/hostname
+  verification for client and replication traffic. Protected mode must stay on;
+  authentication never substitutes for network isolation.
+- Store Redis passwords, ACL files, certificates, and private deployment settings
+  in a secret manager or ignored local secret files. Never commit them, bake them
+  into images, expose them to browsers, or print authenticated connection URLs.
+- The unauthenticated, non-TLS local Redis example is allowed only on its isolated
+  internal Docker network while production mode remains disabled. Do not present
+  it as a production security configuration. Implement/test client ACL and TLS
+  support before enabling production.
+- Redis authorization or quota-storage failures must stop access; never bypass
+  limits or fall back to an unprotected/public Redis instance.
+- Update and run the Redis network-policy and configuration checks for deployment
+  changes. Fail checks if Redis has a published port, a public/non-internal
+  network, or an unauthorized network member. Verify real connections: API and
+  gateways must reach Redis; HAProxy must not. Do not weaken isolation to pass.
+- Commit portable configuration examples only; keep active regional configs,
+  secret values, machine paths, and operational evidence out of Git.
