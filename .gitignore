@@ -1,0 +1,41 @@
+# Secrets and developer-specific environment/configuration.
+.env*
+!.env.example
+.secrets/
+secrets/
+*.local.*
+*.private.*
+*.yaml
+*.yml
+*.cfg
+*.toml
+!Cargo.toml
+!*.example.yaml
+!*.example.yml
+!*.example.cfg
+!*.example.toml
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+
+# Build products, generated browser dependencies, caches and local state.
+target/
+node_modules/
+web/runtime/vendor/
+artifacts/
+*.log
+*.db
+*.sqlite*
+*.rdb
+*.aof
+*.dump
+__pycache__/
+.DS_Store
+
+# Existing local research and machine-specific validation documentation.
+mellowtel-code-walkthrough.html
+docs/setup.html
+docs/validation.html
+scripts/report.py

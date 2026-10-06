@@ -1,0 +1,19 @@
+# Only source and dependency manifests enter the build context.
+**
+!Dockerfile
+!Cargo.toml
+!Cargo.lock
+!package.json
+!package-lock.json
+!src/
+!src/**
+!scripts/
+!scripts/vendor.mjs
+!web/
+!web/**
+web/runtime/vendor/
+**/.env*
+**/*.local.*
+**/*.private.*
+**/*.pem
+**/*.key

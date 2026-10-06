@@ -1,0 +1,524 @@
+use crate::{
+    State,
+    api::ApiError,
+    config::{is_id, now_ms, random_id},
+    store::Session,
+};
+use anyhow::{Result, bail};
+use axum::{
+    extract::{
+        Query, State as AxumState,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
+    http::{HeaderMap, StatusCode},
+    response::Response,
+};
+use bytes::Bytes;
+use futures_util::{Sink, StreamExt};
+use serde::Deserialize;
+use std::{
+    net::IpAddr,
+    pin::Pin,
+    sync::{Arc, atomic::Ordering},
+    time::{Duration, Instant},
+};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    net::TcpStream,
+    sync::Semaphore,
+    task::JoinSet,
+    time::timeout,
+};
+use tokio_util::{compat::FuturesAsyncReadCompatExt, sync::CancellationToken};
+use wisp_mux::{
+    ServerMux, WispError,
+    packet::{CloseReason, ConnectPacket, StreamType},
+    stream::MuxStream,
+};
+
+struct AxumTransport {
+    socket: WebSocket,
+    ping: tokio::time::Interval,
+    flushing: bool,
+}
+impl futures_util::Stream for AxumTransport {
+    type Item = Result<Bytes, WispError>;
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        use std::task::Poll;
+        if self.flushing {
+            match Pin::new(&mut self.socket).poll_flush(cx) {
+                Poll::Ready(Ok(())) => self.flushing = false,
+                Poll::Ready(Err(e)) => {
+                    return Poll::Ready(Some(Err(WispError::WsImplError(Box::new(e)))));
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        if self.ping.poll_tick(cx).is_ready()
+            && let Poll::Ready(Ok(())) = Pin::new(&mut self.socket).poll_ready(cx)
+        {
+            if let Err(e) = Pin::new(&mut self.socket).start_send(Message::Ping(Bytes::new())) {
+                return Poll::Ready(Some(Err(WispError::WsImplError(Box::new(e)))));
+            }
+            self.flushing = true;
+            cx.waker().wake_by_ref();
+        }
+        loop {
+            match Pin::new(&mut self.socket).poll_next(cx) {
+                Poll::Ready(Some(Ok(Message::Binary(b)))) => return Poll::Ready(Some(Ok(b))),
+                Poll::Ready(Some(Ok(Message::Close(_)))) | Poll::Ready(None) => {
+                    return Poll::Ready(None);
+                }
+                Poll::Ready(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => continue,
+                Poll::Ready(Some(Ok(_))) => {
+                    return Poll::Ready(Some(Err(WispError::PacketTooSmall)));
+                }
+                Poll::Ready(Some(Err(e))) => {
+                    return Poll::Ready(Some(Err(WispError::WsImplError(Box::new(e)))));
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+impl Sink<Bytes> for AxumTransport {
+    type Error = WispError;
+    fn poll_ready(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        Pin::new(&mut self.socket)
+            .poll_ready(cx)
+            .map_err(|e| WispError::WsImplError(Box::new(e)))
+    }
+    fn start_send(mut self: Pin<&mut Self>, b: Bytes) -> Result<(), Self::Error> {
+        Pin::new(&mut self.socket)
+            .start_send(Message::Binary(b))
+            .map_err(|e| WispError::WsImplError(Box::new(e)))
+    }
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        Pin::new(&mut self.socket)
+            .poll_flush(cx)
+            .map_err(|e| WispError::WsImplError(Box::new(e)))
+    }
+    fn poll_close(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        Pin::new(&mut self.socket)
+            .poll_close(cx)
+            .map_err(|e| WispError::WsImplError(Box::new(e)))
+    }
+}
+type WsSink = futures_util::stream::SplitSink<AxumTransport, Bytes>;
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Ticket {
+    ticket: String,
+}
+pub async fn upgrade_path(
+    state: AxumState<State>,
+    headers: HeaderMap,
+    axum::extract::Path(ticket): axum::extract::Path<String>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    upgrade(state, headers, Query(Ticket { ticket }), ws).await
+}
+pub async fn upgrade(
+    AxumState(state): AxumState<State>,
+    headers: HeaderMap,
+    Query(q): Query<Ticket>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    if headers.get("origin").and_then(|x| x.to_str().ok())
+        != Some(state.cfg.runtime_origin.as_str())
+        || !is_id(&q.ticket)
+    {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "Invalid transport authorization",
+        ));
+    }
+    let owner = random_id();
+    let session = state.store.claim(&q.ticket, &owner).await.map_err(|_| {
+        ApiError(
+            StatusCode::UNAUTHORIZED,
+            "Ticket expired, used, or session already connected",
+        )
+    })?;
+    if session.region != state.cfg.region {
+        state.store.release(&session, &owner).await;
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "Session belongs to another region",
+        ));
+    }
+    state.metrics.accepted.fetch_add(1, Ordering::Relaxed);
+    Ok(ws
+        .max_frame_size(65541)
+        .max_message_size(65541)
+        .on_upgrade(move |socket| run(socket, state, session, owner)))
+}
+
+async fn run(socket: WebSocket, state: State, session: Session, owner: String) {
+    state.metrics.connections.fetch_add(1, Ordering::Relaxed);
+    let (write, read) = AxumTransport {
+        socket,
+        ping: tokio::time::interval(Duration::from_secs(3)),
+        flushing: false,
+    }
+    .split();
+    // Bound malformed/CONNECT floods before the library's unbounded stream admission queue.
+    let mut frame_window = Instant::now();
+    let mut connects = 0u32;
+    let read = Box::pin(read.filter_map(move |item| {
+        let out = match item {
+            Ok(b) => {
+                if frame_window.elapsed() >= Duration::from_secs(1) {
+                    frame_window = Instant::now();
+                    connects = 0;
+                }
+                if b.first() == Some(&1) {
+                    connects += 1;
+                }
+                if connects > 32 {
+                    Some(Err(WispError::MaxStreamCountReached))
+                } else {
+                    Some(Ok(b))
+                }
+            }
+            Err(e) => Some(Err(e)),
+        };
+        futures_util::future::ready(out)
+    }));
+    let result = ServerMux::new(read, write, 4, None).await;
+    if let Ok(result) = result {
+        let (mux, driver) = result.with_no_required_extensions();
+        let mut driver = tokio::spawn(driver);
+        let cancel = CancellationToken::new();
+        let permits = Arc::new(Semaphore::new(state.cfg.max_streams));
+        let mut streams = JoinSet::new();
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            tokio::select! {
+                _=&mut driver=>break,
+                _=tick.tick()=>{
+                    if !state.store.heartbeat(&session,&owner).await.unwrap_or(false) { break; }
+                },
+                _=cancel.cancelled()=>break,
+                Some(_)=streams.join_next(),if !streams.is_empty()=>{},
+                incoming=mux.wait_for_stream()=>{
+                    let Some((packet,stream))=incoming else {break};
+                    let permit=permits.clone().try_acquire_owned();
+                    if packet.stream_type!=StreamType::Tcp || permit.is_err()
+                        || !state.store.stream_token(&session,&owner,state.cfg.stream_rate,state.cfg.stream_burst).await.unwrap_or(false) {
+                        state.metrics.rejected.fetch_add(1,Ordering::Relaxed);
+                        let _=timeout(Duration::from_secs(1),stream.close(CloseReason::ServerStreamThrottled)).await;
+                        continue;
+                    }
+                    let permit=permit.unwrap(); let s=state.clone(); let context=session.clone();
+                    let connection_owner=owner.clone(); let stopped=cancel.clone();
+                    streams.spawn(async move {
+                        let _permit=permit;
+                        s.metrics.streams.fetch_add(1,Ordering::Relaxed);
+                        tokio::select! {
+                            _=stopped.cancelled()=>{},
+                            _=forward(packet,stream,s.clone(),context,connection_owner,stopped.clone())=>{},
+                        }
+                        s.metrics.streams.fetch_sub(1,Ordering::Relaxed);
+                    });
+                }
+            }
+        }
+        cancel.cancel();
+        let _ = timeout(
+            Duration::from_secs(1),
+            mux.close_with_reason(CloseReason::Voluntary),
+        )
+        .await;
+        while streams.join_next().await.is_some() {}
+        driver.abort();
+    }
+    state.store.release(&session, &owner).await;
+    state.metrics.connections.fetch_sub(1, Ordering::Relaxed);
+}
+
+/// Only globally routable destinations, including rejecting mapped IPv4 and translation ranges.
+pub fn public_ip(ip: IpAddr) -> bool {
+    let blocked: &[&str] = match ip {
+        IpAddr::V4(_) => &[
+            "0.0.0.0/8",
+            "10.0.0.0/8",
+            "100.64.0.0/10",
+            "127.0.0.0/8",
+            "169.254.0.0/16",
+            "172.16.0.0/12",
+            "192.0.0.0/24",
+            "192.0.2.0/24",
+            "192.88.99.0/24",
+            "192.168.0.0/16",
+            "198.18.0.0/15",
+            "198.51.100.0/24",
+            "203.0.113.0/24",
+            "224.0.0.0/4",
+            "240.0.0.0/4",
+        ],
+        IpAddr::V6(_) => &[
+            "::/96",
+            "::ffff:0:0/96",
+            "64:ff9b::/96",
+            "64:ff9b:1::/48",
+            "100::/64",
+            "2001::/23",
+            "2001:db8::/32",
+            "2002::/16",
+            "3fff::/20",
+            "fc00::/7",
+            "fe80::/10",
+            "ff00::/8",
+        ],
+    };
+    if let IpAddr::V6(v) = ip
+        && (v.segments()[0] & 0xe000) != 0x2000
+    {
+        return false;
+    }
+    !blocked
+        .iter()
+        .any(|cidr| cidr.parse::<ipnet::IpNet>().unwrap().contains(&ip))
+}
+async fn resolve(packet: &ConnectPacket, state: &State) -> Result<IpAddr> {
+    if ![80, 443].contains(&packet.port) {
+        bail!("port blocked");
+    }
+    let host = packet.host.trim_end_matches('.').to_ascii_lowercase();
+    // Reserved fixture destinations never resolve or connect directly. Only the mock proxy sees them.
+    if state.cfg.test_mode && (host == "fixture.test" || host == "second.test") {
+        return Ok("203.0.113.10".parse()?);
+    }
+    if host.len() > 253
+        || host.is_empty()
+        || host
+            .bytes()
+            .any(|c| !c.is_ascii_alphanumeric() && !b".-:".contains(&c))
+        || host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host.ends_with(".internal")
+        || host == "shifter.io"
+        || host.ends_with(".shifter.io")
+    {
+        bail!("host blocked");
+    }
+    let addresses: Vec<IpAddr> = tokio::net::lookup_host((host.as_str(), packet.port))
+        .await?
+        .map(|x| x.ip())
+        .collect();
+    if addresses.is_empty()
+        || addresses
+            .iter()
+            .any(|x| !public_ip(*x) || state.cfg.upstream_ips.contains(x))
+    {
+        bail!("address blocked");
+    }
+    addresses
+        .iter()
+        .find(|x| x.is_ipv4())
+        .or(addresses.first())
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("no address"))
+}
+async fn connect(packet: &ConnectPacket, state: &State, session: &Session) -> Result<TcpStream> {
+    let ip = resolve(packet, state).await?;
+    let user = state.cfg.username(&session.country, &session.sid)?;
+    let mut socket =
+        TcpStream::connect((state.cfg.upstream_host.as_str(), state.cfg.upstream_port)).await?;
+    socket.set_nodelay(true)?;
+    // RFC 1928 + RFC 1929. All destination connections are opened through this authenticated tunnel.
+    socket.write_all(&[5, 1, 2]).await?;
+    let mut pair = [0; 2];
+    socket.read_exact(&mut pair).await?;
+    if pair != [5, 2] {
+        bail!("upstream authentication method rejected");
+    }
+    let mut auth = Vec::with_capacity(3 + user.len() + state.cfg.password.len());
+    auth.extend_from_slice(&[1, user.len() as u8]);
+    auth.extend_from_slice(user.as_bytes());
+    auth.push(state.cfg.password.len() as u8);
+    auth.extend_from_slice(state.cfg.password.as_bytes());
+    socket.write_all(&auth).await?;
+    auth.fill(0);
+    socket.read_exact(&mut pair).await?;
+    if pair != [1, 0] {
+        bail!("upstream authentication rejected");
+    }
+    let mut request = vec![5, 1, 0];
+    match ip {
+        IpAddr::V4(v) => {
+            request.push(1);
+            request.extend_from_slice(&v.octets());
+        }
+        IpAddr::V6(v) => {
+            request.push(4);
+            request.extend_from_slice(&v.octets());
+        }
+    }
+    request.extend_from_slice(&packet.port.to_be_bytes());
+    socket.write_all(&request).await?;
+    let mut reply = [0; 4];
+    socket.read_exact(&mut reply).await?;
+    if reply[0] != 5 || reply[1] != 0 {
+        bail!("upstream destination unavailable");
+    }
+    let count = match reply[3] {
+        1 => 4,
+        4 => 16,
+        3 => socket.read_u8().await? as usize,
+        _ => bail!("invalid upstream response"),
+    };
+    let mut ignored = vec![0; count + 2];
+    socket.read_exact(&mut ignored).await?;
+    Ok(socket)
+}
+async fn forward(
+    packet: ConnectPacket,
+    stream: MuxStream<WsSink>,
+    state: State,
+    s: Session,
+    owner: String,
+    cancel: CancellationToken,
+) {
+    let closer = stream.get_close_handle();
+    let connection = timeout(
+        Duration::from_secs(state.cfg.connect_timeout),
+        connect(&packet, &state, &s),
+    )
+    .await;
+    let tcp = match connection {
+        Ok(Ok(tcp)) => tcp,
+        _ => {
+            state.metrics.rejected.fetch_add(1, Ordering::Relaxed);
+            let _ = timeout(
+                Duration::from_secs(1),
+                closer.close(CloseReason::ServerStreamUnreachable),
+            )
+            .await;
+            return;
+        }
+    };
+    let (mut input, mut output) = tokio::io::split(stream.into_async_rw().compat());
+    let (mut from_site, mut to_site) = tcp.into_split();
+    let last = Arc::new(std::sync::atomic::AtomicU64::new(now_ms()));
+    let up: Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> =
+        Box::pin(copy_charged(
+            &mut input,
+            &mut to_site,
+            &state,
+            &s,
+            &owner,
+            true,
+            last.clone(),
+            cancel.clone(),
+        ));
+    let down: Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> =
+        Box::pin(copy_charged(
+            &mut from_site,
+            &mut output,
+            &state,
+            &s,
+            &owner,
+            false,
+            last.clone(),
+            cancel.clone(),
+        ));
+    let idle = async {
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            if now_ms().saturating_sub(last.load(Ordering::Relaxed))
+                >= state.cfg.idle_timeout * 1000
+            {
+                break;
+            }
+        }
+    };
+    tokio::select! { _=up=>{},_=down=>{},_=idle=>{} }
+    let _ = timeout(Duration::from_secs(1), closer.close(CloseReason::Voluntary)).await;
+}
+#[allow(clippy::too_many_arguments)]
+async fn copy_charged<R: AsyncRead + Unpin + Send, W: AsyncWrite + Unpin + Send>(
+    reader: &mut R,
+    writer: &mut W,
+    state: &State,
+    s: &Session,
+    owner: &str,
+    up: bool,
+    last: Arc<std::sync::atomic::AtomicU64>,
+    cancel: CancellationToken,
+) -> Result<()> {
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        let n = reader.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        let allowed = match state.store.charge(s, owner, n).await {
+            Ok(n) => n,
+            Err(e) => {
+                cancel.cancel();
+                return Err(e);
+            }
+        };
+        if allowed == 0 {
+            cancel.cancel();
+            bail!("allowance ended");
+        }
+        writer.write_all(&buf[..allowed]).await?;
+        writer.flush().await?;
+        last.store(now_ms(), Ordering::Relaxed);
+        let metric = if up {
+            &state.metrics.bytes_up
+        } else {
+            &state.metrics.bytes_down
+        };
+        metric.fetch_add(allowed as u64, Ordering::Relaxed);
+        if allowed < n {
+            cancel.cancel();
+            bail!("allowance ended");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn destination_policy() {
+        for s in [
+            "127.0.0.1",
+            "10.2.3.4",
+            "100.64.0.1",
+            "169.254.169.254",
+            "192.168.1.1",
+            "198.18.0.1",
+            "203.0.113.1",
+            "224.0.0.1",
+            "::1",
+            "::ffff:127.0.0.1",
+            "64:ff9b::7f00:1",
+            "fd00::1",
+            "fe80::1",
+            "2001:db8::1",
+        ] {
+            assert!(!public_ip(s.parse().unwrap()), "{s}");
+        }
+        for s in ["1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"] {
+            assert!(public_ip(s.parse().unwrap()), "{s}");
+        }
+    }
+}

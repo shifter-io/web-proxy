@@ -1,0 +1,18 @@
+# Portable example. Generate an ignored local copy with scripts/configure.sh.
+services:
+  api:
+    environment: {APP_ENV: test, REDIS_URL: "redis://redis:6379/1"}
+  gateway-a:
+    environment: {APP_ENV: test, REDIS_URL: "redis://redis:6379/1"}
+    depends_on: {mock-upstream: {condition: service_started}}
+  gateway-b:
+    environment: {APP_ENV: test, REDIS_URL: "redis://redis:6379/1"}
+    depends_on: {mock-upstream: {condition: service_started}}
+  mock-upstream:
+    image: python:3.12-alpine@sha256:1b668429b3511ab407d8e00648891631b0b1a4d7e15e3ca70f38ab5b91ad4ab4
+    profiles: [test]
+    command: [python, /fixtures/server.py]
+    volumes: ["./tests/fixtures:/fixtures:ro"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]

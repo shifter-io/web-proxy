@@ -1,0 +1,81 @@
+# Portable example. Generate an ignored local copy with scripts/configure.sh.
+name: shifter-web
+x-app: &app
+  build: .
+  image: shifter-web:local
+  init: true
+  restart: "no"
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  ulimits:
+    nofile: {soft: 65536, hard: 65536}
+  depends_on:
+    redis: {condition: service_healthy}
+  healthcheck:
+    test: [CMD, curl, -fsS, http://localhost:3000/health]
+    interval: 5s
+    timeout: 3s
+    retries: 12
+x-env: &env
+  APP_ENV: development
+  SHIFTER_REGION: ${SHIFTER_REGION:-blr}
+  REDIS_URL: redis://redis:6379/
+  CONTROL_ORIGIN: http://localhost:8080
+  RUNTIME_ORIGIN: http://localhost:8081
+  SESSION_SECONDS: ${SESSION_SECONDS:-600}
+  BYTE_LIMIT: ${BYTE_LIMIT:-104857600}
+  MAX_STREAMS: ${MAX_STREAMS:-32}
+  STREAM_RATE: ${STREAM_RATE:-8}
+  STREAM_BURST: ${STREAM_BURST:-16}
+  CONNECT_TIMEOUT_SECONDS: ${CONNECT_TIMEOUT_SECONDS:-15}
+  IDLE_TIMEOUT_SECONDS: ${IDLE_TIMEOUT_SECONDS:-60}
+services:
+  haproxy:
+    image: haproxy:3.2-alpine@sha256:5d97434a423c2533cfeb42874d45cf6d69a840b60334582dfbfd5008e94c80be
+    ports: ["127.0.0.1:8080:8080", "127.0.0.1:8081:8081"]
+    volumes: ["./deploy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro"]
+    depends_on:
+      api: {condition: service_healthy}
+      gateway-a: {condition: service_healthy}
+      gateway-b: {condition: service_healthy}
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    ulimits:
+      nofile: {soft: 65536, hard: 65536}
+  redis:
+    image: redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
+    command: [redis-server, --appendonly, "yes", --maxmemory, 256mb, --maxmemory-policy, noeviction]
+    volumes: [redis-data:/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+  api:
+    <<: *app
+    environment:
+      <<: *env
+      ROLE: api
+      REPLICA: api
+  gateway-a:
+    <<: *app
+    environment:
+      <<: *env
+      ROLE: gateway
+      REPLICA: gateway-a
+    secrets: [shifter_credentials]
+  gateway-b:
+    <<: *app
+    environment:
+      <<: *env
+      ROLE: gateway
+      REPLICA: gateway-b
+    secrets: [shifter_credentials]
+secrets:
+  shifter_credentials:
+    file: ${SHIFTER_CREDENTIALS_FILE:?Set SHIFTER_CREDENTIALS_FILE in .env to the existing TOML secrets file}
+volumes:
+  redis-data:

@@ -1,0 +1,242 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Shifter Web Proxy — README</title><style>*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:#f5f7f3;color:#19271f;font:16px/1.65 system-ui,-apple-system,sans-serif}header,main,footer{max-width:1100px;margin:auto;padding:30px 40px}header{border-bottom:1px solid #ced9ce;font-size:13px;letter-spacing:1.5px;font-weight:650}main{padding-top:14px}h1{font-size:38px;letter-spacing:-1.3px;line-height:1.2}h2{margin-top:52px;padding-top:18px;border-top:1px solid #d4dfd2;font-size:25px}h3{margin-top:28px;font-size:19px}p,li{max-width:960px}a{color:#156042;text-underline-offset:3px}code{font:13px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}pre{padding:20px;overflow:auto;background:#e8eee5;border-radius:7px}pre code{white-space:pre;overflow-wrap:normal}.table{overflow-x:auto}table{width:100%;border-collapse:collapse;font-size:14px}th,td{padding:11px 12px;border-bottom:1px solid #d4dfd2;text-align:left;vertical-align:top}th{background:#e7eee4}li{margin:7px 0}footer{border-top:1px solid #ced9ce;color:#5b6d60;font-size:13px}h2,h3{scroll-margin-top:18px}@media(max-width:650px){header,main,footer{padding:22px}h1{font-size:30px}table{min-width:600px}}@media print{body{background:white}header,main,footer{max-width:none;padding:12px}h2,h3{break-after:avoid}pre{white-space:pre-wrap}}</style></head><body><header>SHIFTER / WEB PROXY · ENGINEERING GUIDE</header><main><h1 id="shifter-web-proxy">Shifter Web Proxy</h1>
+<p>A local web proxy prototype that combines <strong>Scramjet in the browser</strong>, <strong>HAProxy in TCP mode</strong>, <strong>Rust Wisp gateways</strong>, <strong>Redis session enforcement</strong>, and <strong>Shifter residential proxies</strong>.</p>
+<p>Visitors enter a website, choose an exit country, and browse inside the page without configuring their browser’s proxy settings. Each visitor receives a server-generated sticky session ID. The gateway adds the upstream credentials and country targeting on the server.</p>
+<p><strong>Status: local development prototype. Backend validation passed; final browser acceptance is incomplete.</strong> Earlier browser runs experienced Wisp disconnections after navigation or idle. A WebSocket keepalive was added, but its final browser regression and the complete cookie-cleanup sequence remain unverified. This is not a production-ready public proxy.</p>
+<p>An offline HTML version of this README is included at <a href="../docs/readme.html">docs/readme.html</a>.</p>
+<h2 id="contents">Contents</h2>
+<ul><li><a href="#what-is-included">What is included</a></li><li><a href="#architecture">Architecture</a></li><li><a href="#repository-and-secret-policy">Repository and secret policy</a></li><li><a href="#requirements">Requirements</a></li><li><a href="#quick-start-with-synthetic-traffic">Quick start with synthetic traffic</a></li><li><a href="#using-a-real-shifter-account">Using a real Shifter account</a></li><li><a href="#configuration-reference">Configuration reference</a></li><li><a href="#session-lifecycle-and-limits">Session lifecycle and limits</a></li><li><a href="#browser-integration-and-isolation">Browser integration and isolation</a></li><li><a href="#api-reference">API reference</a></li><li><a href="#gateway-forwarding-and-destination-policy">Gateway forwarding and destination policy</a></li><li><a href="#haproxy-regions-and-recovery">HAProxy, regions, and recovery</a></li><li><a href="#testing-and-validation">Testing and validation</a></li><li><a href="#operations-and-troubleshooting">Operations and troubleshooting</a></li><li><a href="#project-layout">Project layout</a></li><li><a href="#dependencies-and-reproducibility">Dependencies and reproducibility</a></li><li><a href="#production-work-still-required">Production work still required</a></li></ul>
+<h2 id="what-is-included">What is included</h2>
+<ul><li>Trusted browsing controls: destination input, country selector, Browse, Back, Forward, Reload, Stop, remaining time, remaining bytes, and status messages.</li><li>An embedded Scramjet runtime using bare-mux and Epoxy transport.</li><li>Two Rust gateway replicas, a Rust session API, Redis, and an HAProxy connection balancer.</li><li>Country selection and a cryptographically random 128-bit SID per browsing assignment.</li><li>Shared time/byte allowances, single-use transport tickets, one active connection per visitor, stream admission limits, revocation, and expiry.</li><li>An authenticated SOCKS5 connector that sends every destination stream through a configured Shifter regional endpoint.</li><li>Synthetic destination/login fixtures, integration checks, outage tests, and a 1,000-session load test.</li><li>Explicit, bounded live smoke tests for country targeting, sampled sticky IP behavior, and TLS forwarding.</li><li>Example configuration files and a bootstrap script that creates ignored local copies.</li></ul>
+<p>The VPN call-to-action is informational. A real app download URL, live CAPTCHA verification, and verified Fingerprint identity are not configured.</p>
+<h2 id="architecture">Architecture</h2>
+<pre><code>Visitor browser
+  |
+  +-- http://localhost:8080
+  |      HAProxy TCP listener
+  |          -&gt; Rust API / trusted browsing controls
+  |          -&gt; Redis: identity-linked daily allowance and tickets
+  |
+  +-- http://localhost:8081
+         HAProxy TCP listener / leastconn
+             -&gt; Rust gateway A or B
+                 |-- serves Scramjet, bare-mux, Epoxy, and service worker
+                 |-- redeems Wisp ticket and claims connection ownership
+                 |-- validates destination and reserves destination bytes
+                 |
+                 +-- authenticated SOCKS5 -&gt; blr.p.shifter.io:443
+                                                -&gt; residential exit
+                                                -&gt; destination website</code></pre>
+<p>Scramjet rewrites proxied website behavior in the visitor’s browser. Wisp carries multiplexed destination TCP streams over a WebSocket. The Rust gateway provides the session-specific upstream connector; Scramjet does not receive the residential proxy credentials.</p>
+<p>The same Rust binary has two roles:</p>
+<div class="table"><table><tr><th>Role</th><th>Responsibility</th><th>Secret access</th></tr><tr><td><code>api</code></td><td>Trusted controls, country list, session lifecycle, ticket issuance</td><td>Does not load the upstream credential file</td></tr><tr><td><code>gateway</code></td><td>Runtime assets, authenticated Wisp, DNS/destination checks, SOCKS forwarding</td><td>Reads the mounted upstream credential file</td></tr></table></div>
+<p>Redis is shared across the API and gateway replicas. No process-global proxy URL is changed when a visitor selects a country. Upstream authenticated connections are not pooled across visitors.</p>
+<h2 id="repository-and-secret-policy">Repository and secret policy</h2>
+<p><strong>Only portable examples of deployment and credential configuration belong in this repository.</strong> Real accounts, passwords, machine paths, resolved configuration, operational logs, session records, live IP evidence, and local validation reports remain outside Git.</p>
+<div class="table"><table><tr><th>Tracked example</th><th>Generated local file</th><th>Purpose</th></tr><tr><td><code>compose.example.yaml</code></td><td><code>compose.yaml</code></td><td>Local development topology</td></tr><tr><td><code>compose.test.example.yaml</code></td><td><code>compose.test.yaml</code></td><td>Synthetic upstream and isolated test database</td></tr><tr><td><code>deploy/haproxy.example.cfg</code></td><td><code>deploy/haproxy.cfg</code></td><td>TCP listeners, balancing, DNS resolution, health checks</td></tr><tr><td><code>.env.example</code></td><td><code>.env</code></td><td>Non-secret mock defaults; local credential-file path for live mode</td></tr><tr><td><code>tests/fixtures/credentials.example.toml</code></td><td><code>tests/fixtures/credentials.toml</code></td><td>Public synthetic values accepted only by the mock fixture</td></tr><tr><td><code>examples/shifter-credentials.example.toml</code></td><td>A file under <code>.secrets/</code> or outside the checkout</td><td>Placeholder schema for a real upstream account</td></tr></table></div>
+<p>The synthetic fixture values are deliberately non-secret test data; they are not a working Shifter account.</p>
+<p>Run <code>sh scripts/configure.sh</code> to generate missing local files. It never overwrites an existing local configuration. Generated files are created with restrictive permissions. Before adopting updated templates, compare them with your local copies and apply changes deliberately.</p>
+<p><code>.gitignore</code> excludes local YAML/CFG/TOML files, environment files, credentials directories, certificates/keys, build products, logs, artifacts, and local-only research/report files. Explicit <code>*.example.*</code> templates, dependency manifests, source, tests, and this documentation are tracked. <code>.dockerignore</code> uses a build-context allowlist so local configuration and evidence do not enter Docker builds.</p>
+<p>Never put a real password in a template, a command-line argument, a Docker build argument, a frontend bundle, an issue, or a test-output file. Git ignore rules do not remove previously committed data: inspect the staged diff before every push.</p>
+<h2 id="requirements">Requirements</h2>
+<ul><li>Docker with the Compose plugin, a running local Docker engine, and support for BuildKit cache mounts.</li><li>A browser with service workers, SharedWorkers, and WebAssembly support. Browser compatibility beyond the observed local fixture flows is not established.</li><li>Node.js 24 when running the host-side test scripts or vendoring assets outside Docker.</li><li>Rust/Cargo compatible with Rust 1.94.1 when running host-side Rust checks. The Docker build includes the pinned toolchain.</li><li>Python 3.11 or newer for <code>tests/secret-scan.py</code>; Python 3 for the offline README renderer.</li><li>Available loopback ports 8080 and 8081.</li></ul>
+<p>The build fetches pinned dependencies and base images. After the images and assets exist locally, the mock destination does not require a real upstream account or destination Internet traffic.</p>
+<h2 id="quick-start-with-synthetic-traffic">Quick start with synthetic traffic</h2>
+<pre><code>git clone https://github.com/leftclick-io/web-proxy.git
+cd web-proxy
+
+# Optional explicit bootstrap; stack.sh also runs it automatically.
+sh scripts/configure.sh
+
+# Build and start the API, two gateways, Redis, HAProxy, and mock upstream.
+sh scripts/stack.sh mock</code></pre>
+<p>Open <strong>http://localhost:8080</strong>. Enter <strong>http://fixture.test/</strong>, select a country, and choose <strong>Browse</strong>.</p>
+<p>The fixture displays the configured exit country and a synthetic assignment marker. It provides a JavaScript fetch, navigation links, redirects, a synthetic username form, and a second virtual origin for cookie-isolation checks. Use only synthetic identities with the fixture.</p>
+<p>Only the HAProxy listeners are published to the host:</p>
+<div class="table"><table><tr><th>URL</th><th>Purpose</th></tr><tr><td><code>http://localhost:8080</code></td><td>Trusted controls and session API</td></tr><tr><td><code>http://localhost:8081</code></td><td>Isolated runtime origin and Wisp endpoint</td></tr></table></div>
+<p>Use <code>localhost</code> consistently. Origin checks expect these exact origins; replacing the host with <code>127.0.0.1</code> changes the origin even though both reach loopback.</p>
+<p>Localhost HTTP supports the service-worker secure-context exception. It does not validate production HTTPS certificates, WSS termination, or a production origin layout.</p>
+<p>To stop the project while retaining its Redis volume:</p>
+<pre><code>sh scripts/stack.sh down</code></pre>
+<h2 id="using-a-real-shifter-account">Using a real Shifter account</h2>
+<p>The repository does not include a real credential file or a path to anyone’s existing secrets.</p>
+<p>Create a private local file from the placeholder schema:</p>
+<pre><code>mkdir -p .secrets
+chmod 700 .secrets
+cp examples/shifter-credentials.example.toml .secrets/shifter.toml
+chmod 600 .secrets/shifter.toml</code></pre>
+<p>Edit that ignored file locally and replace the placeholders with your account and password. The expected TOML structure is:</p>
+<pre><code>[shifter]
+account = &quot;YOUR_ACCOUNT&quot;
+password = &quot;REPLACE_LOCALLY&quot;</code></pre>
+<p>The account may include the <code>customer-</code> prefix; the loader removes it before constructing the full username. Supply the base account, not a username already decorated with country/SID flags.</p>
+<p>Edit the ignored <code>.env</code> file:</p>
+<pre><code>SHIFTER_CREDENTIALS_FILE=./.secrets/shifter.toml
+SHIFTER_REGION=blr
+SESSION_SECONDS=600
+BYTE_LIMIT=104857600</code></pre>
+<p>Then start live development mode:</p>
+<pre><code>sh scripts/stack.sh live</code></pre>
+<p>The credential file is mounted read-only at <code>/run/secrets/shifter_credentials</code> in each gateway. The non-root container user must be able to read the mount under your Docker engine’s host-file permission mapping. If access fails, provision a suitably owned/group-readable secret for UID 10001; do not solve it by committing the file or making the secret world-readable.</p>
+<p>The default regional hostname is <code>blr.p.shifter.io:443</code>. The selected exit country remains independent of this regional ingress setting.</p>
+<p>Switching between mock and live recreates the application containers and interrupts current requests. The profiles use separate Redis databases: mock uses DB 1; live development uses DB 0. The live command removes the orphaned mock fixture container.</p>
+<h2 id="configuration-reference">Configuration reference</h2>
+<p>The example Compose environment supplies the following defaults. Customize the ignored <code>.env</code> and local Compose files as needed.</p>
+<div class="table"><table><tr><th>Variable</th><th>Default</th><th>Meaning</th></tr><tr><td><code>SHIFTER_CREDENTIALS_FILE</code></td><td>Mock fixture path in the example</td><td>Host-side path mounted as the live gateway secret</td></tr><tr><td><code>SHIFTER_REGION</code></td><td><code>blr</code></td><td>Explicit Shifter ingress region</td></tr><tr><td><code>SESSION_SECONDS</code></td><td><code>600</code></td><td>Daily browsing window, maximum 600 seconds</td></tr><tr><td><code>BYTE_LIMIT</code></td><td><code>104857600</code></td><td>100 MiB combined destination payload per UTC day</td></tr><tr><td><code>MAX_STREAMS</code></td><td><code>32</code></td><td>Concurrent destination streams per Wisp connection; configuration maximum 128</td></tr><tr><td><code>STREAM_RATE</code></td><td><code>8</code></td><td>New destination streams per second</td></tr><tr><td><code>STREAM_BURST</code></td><td><code>16</code></td><td>Redis token-bucket burst size</td></tr><tr><td><code>CONNECT_TIMEOUT_SECONDS</code></td><td><code>15</code></td><td>DNS plus authenticated upstream establishment timeout</td></tr><tr><td><code>IDLE_TIMEOUT_SECONDS</code></td><td><code>60</code></td><td>Destination-stream idle timeout</td></tr></table></div>
+<p>A separate protocol-flood guard terminates a Wisp connection after more than 32 CONNECT packets within its one-second admission window. Raising the token-bucket settings does not remove that guard.</p>
+<p>These advanced settings are set in the local Compose environment or supplied when running the binary directly:</p>
+<div class="table"><table><tr><th>Variable</th><th>Example/default</th><th>Meaning</th></tr><tr><td><code>APP_ENV</code></td><td><code>development</code> or <code>test</code></td><td>Development uses real Shifter; test uses the synthetic upstream. Other values, including <code>production</code>, are rejected.</td></tr><tr><td><code>ROLE</code></td><td><code>api</code> or <code>gateway</code></td><td>Binary role</td></tr><tr><td><code>REPLICA</code></td><td><code>api</code>, <code>gateway-a</code>, <code>gateway-b</code></td><td>Operational identity for health/metrics</td></tr><tr><td><code>LISTEN</code></td><td><code>0.0.0.0:3000</code></td><td>Listener inside the container</td></tr><tr><td><code>REDIS_URL</code></td><td><code>redis://redis:6379/</code></td><td>Shared session store; mock override selects <code>/1</code></td></tr><tr><td><code>CONTROL_ORIGIN</code></td><td><code>http://localhost:8080</code></td><td>Exact trusted browser origin</td></tr><tr><td><code>RUNTIME_ORIGIN</code></td><td><code>http://localhost:8081</code></td><td>Exact runtime/WebSocket origin</td></tr><tr><td><code>CREDENTIALS_FILE</code></td><td><code>/run/secrets/shifter_credentials</code></td><td>In-container credential path</td></tr><tr><td><code>WEB_DIR</code></td><td><code>/app/web</code> in Docker</td><td>Static asset root</td></tr></table></div>
+<p>Supported country codes are <code>us</code>, <code>gb</code>, <code>de</code>, <code>fr</code>, <code>ca</code>, <code>au</code>, <code>sg</code>, and <code>in</code>. The interface defaults to the United States. Missing or unlisted countries are rejected; country targeting is never silently omitted.</p>
+<p>The regional allowlist is <code>fra</code>, <code>ams</code>, <code>lon</code>, <code>nyc</code>, <code>tor</code>, <code>sgp</code>, <code>blr</code>, and <code>syd</code>. Only the BLR upstream was exercised in the initial live validation.</p>
+<h2 id="session-lifecycle-and-limits">Session lifecycle and limits</h2>
+<h3 id="identity-and-daily-allowance">Identity and daily allowance</h3>
+<p>The local visitor identity is an opaque first-party cookie named <code>shifter_dev</code>, with HttpOnly and SameSite=Strict attributes. This is a development identity, not verified anti-abuse identity. Deleting/replacing cookies can create another visitor; the current service must not be exposed as a public free proxy.</p>
+<p>On first session creation, Redis records the visitor’s country, SID, region, expiry, byte usage, limit, revision, and stopped state. The browsing window starts immediately, including time spent idle or stopped. Its expiry is the earlier of the configured duration and the next UTC midnight.</p>
+<p>The daily allowance is shared across streams and replicas. Reconnects, country changes, Stop, and resume do not reset time or byte usage. Session records remain long enough to enforce the daily allowance rather than disappearing when browsing stops.</p>
+<h3 id="connection-authorization">Connection authorization</h3>
+<ol><li>The trusted UI requests a short-lived ticket from the session API.</li><li>The API creates a random ticket containing an immutable session snapshot and a 30-second TTL.</li><li>The trusted page sends the ticket to the runtime using exact-origin <code>postMessage</code> with source-window validation.</li><li>The runtime opens the authenticated Wisp WebSocket.</li><li>The gateway atomically consumes the ticket using Redis GETDEL, then atomically validates the session revision and claims its connection lease.</li><li>An active owner blocks another simultaneous connection for the same daily visitor record.</li><li>Backend checks renew the six-second lease approximately every second and verify expiry, revision, ownership, and available bytes.</li></ol>
+<p>A ticket cannot be reused. Country changes, revocation, and explicit reconnect revision changes invalidate previously issued tickets. The browser cannot supply an upstream SID, account, password, or host through the API.</p>
+<h3 id="forwarding-quota">Forwarding quota</h3>
+<p>Before forwarding each chunk, a Redis script validates authorization and reserves up to 16 KiB from the shared allowance. Both directions count, including destination TLS traffic. Wisp/control framing is not destination payload. A failed write may conservatively consume its reservation; quotas do not depend on a delayed after-the-fact counter.</p>
+<p>Storage errors fail authorization/forwarding closed. Existing connections are also monitored while idle. An interface countdown alone does not grant or revoke access.</p>
+<h3 id="country-changes-stop-and-reconnect">Country changes, Stop, and reconnect</h3>
+<p>Changing country revokes the old connection, generates a fresh SID, preserves the original allowance, and starts a clean proxied website context. Sites may require login again.</p>
+<p>Stop revokes active access and requests website-state cleanup. Resuming uses the same daily time/byte budget and creates a new assignment after a stopped session.</p>
+<p>Reload performs an explicit reconnect, retains country/SID/region/allowance, waits for the old connection lease to clear, and reloads the displayed address. Interrupted form submissions are not automatically replayed. Browser cookie retention across this reconnect still needs final acceptance testing.</p>
+<p>Different SIDs represent independent assignment requests. They do not guarantee globally unique residential IPs. Even a sticky SID can receive a new IP when its residential peer disconnects or its upstream TTL expires.</p>
+<h2 id="browser-integration-and-isolation">Browser integration and isolation</h2>
+<p>The trusted controls and proxied content use separate local origins. The runtime owns Scramjet, its service worker, a bare-mux SharedWorker, and the Epoxy transport. A nested frame displays the destination website.</p>
+<p>The runtime attempts to clear local/session storage, service-worker registrations, caches, and IndexedDB stores on Stop, country change, and expiry. Cleanup is attempted before starting the next runtime after an interrupted session. This is a cleanup lifecycle, not a forensic erasure guarantee. Backend expiry remains effective when browser cleanup does not run.</p>
+<p>The browser integration implements HTML navigation, JavaScript network requests, forms, redirects, and cookie handling through the engine. Compatibility is site-dependent. The observed fixture login/navigation flow is not evidence that every public website, OAuth flow, payment flow, WebAuthn flow, or browser feature will work.</p>
+<p>Security-sensitive boundaries include exact Origin checks, postMessage source checks, no upstream credentials in browser code, and a separate trusted control origin. Scramjet’s emulated destination origins are not equivalent to separate browser-enforced origins for every destination; the engine and its isolation need further adversarial review before public deployment.</p>
+<p>Production proxied content must use a separate registrable domain from trusted Shifter pages. Changing only the port is a local test arrangement. Production transport-origin routing, HTTPS/WSS, and certificate management are future work.</p>
+<h2 id="api-reference">API reference</h2>
+<p>The session API is on the control origin. Mutation requests require its exact Origin header. The browser supplies the development cookie automatically. JSON bodies use <code>Content-Type: application/json</code>; the API body limit is 1 KiB.</p>
+<div class="table"><table><tr><th>Method and path</th><th>Body</th><th>Purpose</th></tr><tr><td><code>GET /api/countries</code></td><td>None</td><td>Configured codes/names, runtime origin, development/test flags</td></tr><tr><td><code>POST /api/sessions</code></td><td><code>{&quot;country&quot;:&quot;us&quot;}</code></td><td>Create or resume the visitor’s daily session</td></tr><tr><td><code>GET /api/session</code></td><td>None</td><td>Public session status and remaining allowance</td></tr><tr><td><code>POST /api/session/tickets</code></td><td>None</td><td>Issue a single-use Wisp authorization valid for 30 seconds</td></tr><tr><td><code>POST /api/session/country</code></td><td><code>{&quot;country&quot;:&quot;de&quot;}</code></td><td>Revoke the current assignment and select a new country</td></tr><tr><td><code>POST /api/session/reconnect</code></td><td>None</td><td>Revoke the old connection revision while preserving SID and allowance</td></tr><tr><td><code>DELETE /api/session</code></td><td>None</td><td>Stop active access</td></tr></table></div>
+<p>A session response includes <code>country</code>, <code>status</code>, <code>serverTime</code>, <code>expiresAt</code>, <code>remainingBytes</code>, <code>byteLimit</code>, <code>connected</code>, and <code>developmentIdentity</code>. Times are Unix milliseconds. Status is <code>active</code>, <code>stopped</code>, <code>expired</code>, or <code>exhausted</code>. Upstream credentials and the upstream SID are not returned.</p>
+<p>The Wisp endpoint is on the runtime origin:</p>
+<pre><code>ws://localhost:8081/wisp/?ticket=&lt;single-use-ticket&gt;
+ws://localhost:8081/wisp/&lt;single-use-ticket&gt;/</code></pre>
+<p>Protocol tests use the query form; the browser transport uses the path form. Both require a valid ticket and the exact runtime Origin. Tickets are sensitive short-lived authorization values; do not add URL/access logging that records them.</p>
+<p>Additional endpoints:</p>
+<div class="table"><table><tr><th>Endpoint</th><th>Availability</th><th>Purpose</th></tr><tr><td><code>GET /health</code></td><td>API and gateways</td><td>Redis-backed readiness check</td></tr><tr><td><code>GET /metrics</code></td><td>API and gateways</td><td>JSON counters: replica, connections, streams, accepted, rejected, bytes up/down</td></tr><tr><td><code>GET /settings</code></td><td>Gateways</td><td>Trusted control origin for runtime messaging</td></tr></table></div>
+<p>Invalid Origins or malformed ticket syntax are denied; missing/inactive sessions, reused tickets, ownership conflicts, and expired allowances are denied. Redis failures prevent authorization. HTTP error details are intentionally limited; Wisp ticket claim failures do not expose account or session internals.</p>
+<h2 id="gateway-forwarding-and-destination-policy">Gateway forwarding and destination policy</h2>
+<p>The gateway uses Tokio and pinned <code>wisp-mux</code> components for framing and multiplexing. It does not implement a second browser or replay website requests on the server.</p>
+<p>For each destination stream, the gateway:</p>
+<ol><li>Checks stream type, concurrent-stream admission, and the shared rate bucket.</li><li>Allows only TCP destination ports 80 and 443; UDP is rejected.</li><li>Resolves the requested hostname locally, validates the returned addresses, and rejects blocked destinations.</li><li>Constructs the Shifter username using the immutable authorized session context.</li><li>Authenticates with SOCKS5 to the explicit regional Shifter endpoint.</li><li>Requests the validated destination IP through that proxy.</li><li>Forwards bytes while enforcing quota, idle timeout, expiry, and revocation.</li></ol>
+<p>The username format is:</p>
+<pre><code>customer-&lt;account&gt;-country-&lt;country&gt;-strict-true-sid-&lt;128-bit-random-hex&gt;-ttl-600</code></pre>
+<p>Account syntax and SOCKS5 credential lengths are validated. Authentication failures do not trigger a direct-connect fallback. Authenticated upstream sockets are not shared between sessions.</p>
+<p>The destination policy rejects private/reserved IPv4/IPv6 ranges, loopback, link-local, multicast, mapped/translation ranges, local/internal names, Shifter infrastructure hostnames, and the configured upstream’s resolved addresses. DNS answers containing a blocked address are rejected rather than selecting a different answer. Connecting to the validated IP prevents a second, unchecked destination DNS lookup by the upstream proxy.</p>
+<p>The destination’s original TLS hostname remains available to the browser transport. The live Node TLS smoke test separately checked opaque TLS forwarding with hostname/certificate verification enabled; it does not validate production frontend certificates or browser-wide compatibility.</p>
+<p>The reserved <code>fixture.test</code> and <code>second.test</code> mappings exist only in test mode. The synthetic SOCKS server serves fixture responses without opening destination Internet connections.</p>
+<h2 id="haproxy-regions-and-recovery">HAProxy, regions, and recovery</h2>
+<p>HAProxy runs in TCP mode with <code>leastconn</code>, backend health checks, Docker DNS resolution, and an eleven-minute connection idle timeout. A gateway sends periodic WebSocket pings. Backend allowance enforcement still ends browsing at its own shorter session deadline.</p>
+<p><strong>HAProxy balances connections, not individual requests inside a Wisp connection.</strong> An established WebSocket remains attached to one replica. Independent visitors and later reconnects may select different replicas.</p>
+<p>If a replica stops, in-flight requests fail. The browser must explicitly reconnect; the surviving replica reads shared Redis state and preserves the session’s country, SID, region, and remaining allowance. A crashed replica’s lease may take up to six seconds to expire, in addition to health-check/routing recovery time.</p>
+<p>The production design should place a regional HAProxy in front of healthy replicas in that same region. Each replica should use the corresponding explicit Shifter regional hostname. Geographic/latency-aware DNS can select a nearby healthy ingress region; it cannot guarantee the nearest server for every visitor.</p>
+<p>This prototype binds sessions to their assigned region and rejects a region mismatch. Cross-region recovery that preserves allowance while creating a fresh residential assignment is not implemented. It must not silently promise IP continuity across regions.</p>
+<h2 id="testing-and-validation">Testing and validation</h2>
+<h3 id="install-host-side-test-dependencies">Install host-side test dependencies</h3>
+<pre><code>npm ci --ignore-scripts
+sh scripts/stack.sh mock</code></pre>
+<p>The Docker asset build runs the vendoring script itself. To populate local generated assets for inspection:</p>
+<pre><code>npm run vendor</code></pre>
+<p>Generated vendor files are ignored by Git and excluded from the input Docker build context.</p>
+<h3 id="mock-and-code-checks">Mock and code checks</h3>
+<pre><code>node tests/integration.mjs
+node tests/limits.mjs
+node tests/load.mjs
+node tests/failover.mjs
+node tests/configuration.mjs
+cargo test --locked
+cargo clippy --all-targets -- -D warnings
+npm audit --audit-level=high</code></pre>
+<div class="table"><table><tr><th>Check</th><th>Coverage</th></tr><tr><td><code>integration.mjs</code></td><td>Country validation, Origin checks, forged/reused tickets, per-visitor country/SID isolation, one active connection, malformed Wisp, forbidden destinations/ports/UDP, reconnect context, country revocation, synthetic form response, shared byte cap, expiry, Stop/resume allowance</td></tr><tr><td><code>limits.mjs</code></td><td>Ticket TTL/expiry, outstanding ticket revocation, unauthorized country changes, sixteen-stream burst, thirty-two-stream concurrency cap</td></tr><tr><td><code>load.mjs</code></td><td>10, 100, 500, and 1,000 simultaneous mock sessions; two 128 KiB requests per session; errors, latency percentiles, throughput, replica counts, sampled Docker CPU/memory</td></tr><tr><td><code>failover.mjs</code></td><td>Different countries on one replica, replica failure/recovery with preserved SID/allowance, Redis outage and fail-closed behavior</td></tr><tr><td><code>configuration.mjs</code></td><td>Production-mode rejection, read-only gateway secret mounts, loopback-only published listeners</td></tr><tr><td>Rust unit test</td><td>Representative allowed/blocked destination addresses</td></tr></table></div>
+<p>Load tests refuse live mode. Failover tests deliberately stop/start gateways and pause/unpause Redis. Use a dedicated local test stack and do not run those tests while using the browsing UI. The scripts restore stopped services in cleanup paths, but inspect the stack after any externally interrupted test.</p>
+<p>Results are written under ignored <code>artifacts/</code>. They can contain local resource information, synthetic identifiers, or live IP addresses; do not commit the raw results.</p>
+<p>To change mock load stages:</p>
+<pre><code>LOAD_STAGES=10,100,500,1000 node tests/load.mjs</code></pre>
+<p>These are short synthetic bursts, not production capacity measurements or a sustained saturation benchmark. Docker CPU samples may include setup or idle periods, and browser JavaScript execution is outside this server load test.</p>
+<h3 id="reset-synthetic-browsing-state">Reset synthetic browsing state</h3>
+<pre><code>node tests/reset-mock.mjs</code></pre>
+<p>This command refuses live mode and clears only this project’s mock Redis DB 1. It allows a new fixture run after the daily window ends. Normal user flows do not reset the daily allowance.</p>
+<h3 id="explicit-live-smoke-checks">Explicit live smoke checks</h3>
+<p>After configuring a real private credential file:</p>
+<pre><code>sh scripts/stack.sh live
+node tests/live-smoke.mjs
+node tests/live-tls.mjs</code></pre>
+<p>The country test checks US and DE using <code>second.example.com/json</code>, with three samples per country including a Wisp reconnect. The TLS test fetches <code>https://example.com</code> through the Wisp/Shifter path with Node certificate verification enabled.</p>
+<p>The scripts inspect existing usage in the dedicated live-development Redis DB 0 and reserve bounded per-visitor quotas within a cumulative <strong>20 MiB</strong> test ceiling. Run them serially on a dedicated stack. This is test accounting, not a global production billing limiter; unrelated concurrent visitors or simultaneous test runners are outside that cumulative-test calculation. Do not clear DB 0 to bypass the smoke-test cap.</p>
+<p>Live smoke scripts print observed IP addresses and store them in ignored artifacts. No upstream credentials should appear in their output.</p>
+<h3 id="credential-scan">Credential scan</h3>
+<pre><code># Requires .env to reference the real private credential file and Python 3.11+.
+python3 tests/secret-scan.py</code></pre>
+<p>The local scan compares exact account/password values against source, generated assets, test evidence, application/HAProxy logs, and image history without printing those values. It supplements review; it does not prove the absence of every possible secret or replace a staged-file audit.</p>
+<h3 id="validation-status-at-the-initial-implementation">Validation status at the initial implementation</h3>
+<ul><li>Twenty-two backend integration, limit, and outage checks passed.</li><li>The 1,000-session mock stage completed 2,000 requests with zero errors and distributed connections across both gateways.</li><li>Live US/DE targeting and sampled sticky behavior passed through the BLR endpoint.</li><li>Node TLS forwarding with certificate verification passed.</li><li>Total recorded live validation traffic was 19,314 destination bytes, including an initial incomplete test-client attempt.</li><li>The destination-policy Rust unit test, Clippy, dependency audit, configuration checks, and exact-value credential scan passed at the time of validation.</li><li>Embedded fixture HTML/JavaScript, a synthetic login, and subsequent link navigation were observed in the browser.</li><li>Final browser idle stability, Back/Forward, full redirect/cookie separation, reconnect cookie retention, and Stop/country/expiry cleanup remain pending.</li></ul>
+<p>Raw local reports, live IPs, and workstation-specific evidence are intentionally not published in this repository. Rerun the included checks to produce evidence for your checkout and device. The summary above is a historical observation, not a promise that future dependency or environment changes will pass.</p>
+<h3 id="remaining-manual-browser-acceptance">Remaining manual browser acceptance</h3>
+<ol><li>Start the mock stack, open the trusted page, and browse <code>http://fixture.test/</code>.</li><li>Confirm the JavaScript country message and submit the synthetic username form.</li><li>Follow Next page, then use Back and Forward; confirm navigation and login state.</li><li>Leave the page idle for at least one minute, then navigate again and check connection stability.</li><li>Verify Redirect, visit Second origin, and confirm that the first origin’s login does not appear there.</li><li>Return to the first origin and confirm its login remains; use Reload and check reconnect cookie retention.</li><li>Change country and confirm a fresh website context with the original allowance retained.</li><li>Stop and resume; confirm website state is cleared while time and byte usage remain shared.</li><li>Expire a session while traffic is active; verify both backend closure and the VPN informational state.</li><li>Interrupt/reload the tab and check next-load cleanup. Perform any additional public-site browser tests under a separately bounded live test budget.</li></ol>
+<h2 id="operations-and-troubleshooting">Operations and troubleshooting</h2>
+<h3 id="inspect-the-local-services">Inspect the local services</h3>
+<pre><code>docker compose ps
+docker compose logs --tail 50 api gateway-a gateway-b haproxy
+curl -fsS http://localhost:8080/health
+curl -fsS http://localhost:8081/health</code></pre>
+<p>The runtime listener balances independent HTTP connections as well as WebSocket connections, so repeated health requests can report different replicas. Metrics contain counters, not destination URLs or visitor labels. There is intentionally no request URL/access logging; adding it could expose tickets and browsing history.</p>
+<h3 id="common-issues">Common issues</h3>
+<div class="table"><table><tr><th>Symptom</th><th>Checks and action</th></tr><tr><td>Compose cannot find local configuration</td><td>Run <code>sh scripts/configure.sh</code>. It copies examples only when local files are missing.</td></tr><tr><td>Live secret cannot be read</td><td>Check the ignored <code>.env</code> path, TOML schema, and UID 10001 mount readability. Do not put the secret in an image or template.</td></tr><tr><td>API denies a request Origin</td><td>Use <code>http://localhost:8080</code> for controls and preserve the configured runtime origin. Update both settings together if changing origins.</td></tr><tr><td>A second tab cannot connect</td><td>One connection is allowed per visitor. Stop the other session or use explicit reconnect and wait for lease cleanup.</td></tr><tr><td>Reconnect is briefly denied after a crash</td><td>Allow the six-second lease and HAProxy health checks to converge. The same country/SID/allowance should be retained.</td></tr><tr><td>Daily allowance ended</td><td>This is expected after expiry/exhaustion. Reconnect and country changes must not reset it. Reset DB 1 only for synthetic tests.</td></tr><tr><td>Fixture hostname fails in live mode</td><td>Fixture mappings are test-only. Start the mock profile for fixture checks.</td></tr><tr><td>Redis is paused after interrupted outage testing</td><td>Inspect the project, then use <code>docker compose unpause redis</code> and <code>docker compose start gateway-a gateway-b</code>.</td></tr><tr><td>Runtime cannot initialize</td><td>Check service worker, SharedWorker, WebAssembly support, exact origins, and generated asset availability.</td></tr><tr><td>Browser loses the connection or a website fails</td><td>This remains an open compatibility/regression area. Use explicit Reload; do not automatically replay form submissions.</td></tr><tr><td>Template changes do not appear locally</td><td>Bootstrap preserves local copies. Compare the example with the ignored local file and apply the change yourself.</td></tr></table></div>
+<p>Redis uses an AOF-backed named volume and a no-eviction memory policy in the example. <code>stack.sh down</code> preserves that volume. Deleting it removes the local allowance ledger. Redis high availability, backup/restore policy, crash-durability guarantees, and production observability are outside this prototype.</p>
+<p>The development cookie is not a public anti-abuse control. <code>APP_ENV=production</code> is deliberately rejected instead of silently using that identity mode.</p>
+<h2 id="project-layout">Project layout</h2>
+<pre><code>src/
+  main.rs                     Role selection, routing, headers, process setup
+  config.rs                   Validated settings and server-side credential loading
+  api.rs                      Session API, trusted controls, health and metrics
+  store.rs                    Redis session state, tickets, leases and quotas
+  relay.rs                    Wisp adapter, admission, destination policy and SOCKS5
+web/
+  control/                    Trusted address bar, country selector and session UI
+  runtime/                    Scramjet setup, service worker and state cleanup
+scripts/
+  configure.sh                Create missing ignored local files from examples
+  stack.sh                    Local mock/live/down lifecycle
+  vendor.mjs                  Copy locked browser dependencies into generated assets
+  render-readme.py            Produce self-contained HTML documentation
+examples/
+  shifter-credentials.example.toml  Placeholder live-account schema
+deploy/
+  haproxy.example.cfg         Portable TCP balancer template
+tests/
+  fixtures/                   Synthetic SOCKS5/destination and mock credential example
+  client.mjs                  Wisp protocol client and TLS tunnel helper
+  integration.mjs             Core authorization, isolation, quota and expiry checks
+  limits.mjs                  Ticket and stream-admission checks
+  load.mjs                    Increasing-concurrency mock benchmark
+  failover.mjs                Gateway/Redis outage checks
+  configuration.mjs           Deployment-default assertions
+  live-smoke.mjs              Bounded real country/sticky-IP checks
+  live-tls.mjs                Bounded real TLS-forwarding check
+  reset-mock.mjs              Reset only isolated mock data
+  secret-scan.py              Local exact-value credential scan
+compose.example.yaml          Portable development stack example
+compose.test.example.yaml     Synthetic test-profile example
+Dockerfile                    Multi-stage source/asset build, non-root runtime
+Cargo.toml / Cargo.lock        Rust dependencies
+package.json / package-lock.json  Browser and test dependencies
+README.md                     GitHub documentation source
+docs/readme.html              Offline standalone HTML version</code></pre>
+<p>Local-only configuration, artifacts, generated dependencies, and pre-existing research documents are omitted from this layout because they are not repository deliverables.</p>
+<h2 id="dependencies-and-reproducibility">Dependencies and reproducibility</h2>
+<div class="table"><table><tr><th>Component</th><th>Pin</th></tr><tr><td>Scramjet</td><td>Release tarball <code>1.1.0</code>, locked in <code>package-lock.json</code></td></tr><tr><td>bare-mux</td><td><code>2.1.9</code></td></tr><tr><td>Epoxy transport</td><td><code>2.1.19</code></td></tr><tr><td>wisp-mux</td><td>epoxy-tls Git revision <code>0c11678d72a636c3a4bc723db87e03e7b888eaf9</code></td></tr><tr><td>Node build stage</td><td>Node 24 image pinned by digest</td></tr><tr><td>Rust build stage</td><td>Rust 1.94.1 image pinned by digest</td></tr><tr><td>HAProxy / Redis / fixture Python</td><td>Example image tags plus immutable digests</td></tr></table></div>
+<p>Use <code>npm ci --ignore-scripts</code> and Cargo’s <code>--locked</code> mode. The Docker build follows those locked inputs and generates browser assets during the build. Container digests and lockfiles improve repeatability; this is not a claim of fully bit-for-bit reproducible images, since operating-system packages are installed during the build.</p>
+<p>Review transport/runtime compatibility when updating dependencies. Their contracts, browser isolation behavior, service-worker caching, and Wisp protocol behavior matter as much as version numbers. The pinned versions and known browser gaps need review before any public rollout.</p>
+<p>Regenerate the standalone README after editing Markdown:</p>
+<pre><code>python3 scripts/render-readme.py</code></pre>
+<p>The HTML file embeds its styling, has no CDN dependencies, and opens without a development server.</p>
+<p>This repository does not grant a blanket license for third-party components. Upstream licenses, including AGPL terms for relevant proxy components, remain applicable. Review their obligations before distributing or hosting a modified public service.</p>
+<h2 id="production-work-still-required">Production work still required</h2>
+<ul><li>Complete the pending browser acceptance procedure and investigate any remaining idle/navigation failures.</li><li>Validate representative public websites and supported authentication flows; define a compatibility policy.</li><li>Replace development cookies with verified anti-abuse identity, server-validated CAPTCHA/Fingerprint events, and abuse monitoring.</li><li>Add broader service-level admission controls, operational resource limits, and sustained load testing.</li><li>Separate trusted Shifter pages and untrusted website content onto different registrable domains; review engine isolation and escape risks.</li><li>Configure production HTTPS/WSS, transport-origin routing, certificate handling, and secure cookie policy.</li><li>Establish regional Redis/state availability and an explicit cross-region recovery protocol that preserves allowance but rotates residential assignment.</li><li>Deploy regional HAProxy/gateway groups and geographic/latency-aware DNS, with health-aware routing.</li><li>Add production telemetry that protects browsing privacy and excludes credentials, connection tickets, and destination URLs.</li><li>Configure a real VPN download destination and final expired-session UX.</li></ul>
+<p>No production DNS changes, public deployment, or remote-device execution are part of this repository’s initial local milestone.</p>
+<p>References: <a href="https://github.com/MercuryWorkshop/scramjet">Scramjet</a>, <a href="https://github.com/MercuryWorkshop/epoxy-tls">epoxy-tls and Wisp</a>, <a href="https://www.haproxy.com/documentation/haproxy-configuration-tutorials/protocol-support/tcp/">HAProxy TCP configuration</a>, <a href="https://shifter.io/docs/products/residential-proxies/gateway-and-auth/">Shifter gateway and regions</a>, <a href="https://shifter.io/docs/products/residential-proxies/geo-targeting/">Shifter geo-targeting</a>, and <a href="https://shifter.io/docs/products/residential-proxies/sessions/">Shifter sessions</a>.</p></main><footer>Generated from README.md. Standalone HTML; no external assets, scripts, CDN, or development server required.</footer></body></html>
