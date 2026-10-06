@@ -26,7 +26,7 @@ x-env: &env
   REDIS_URL_FILE: /run/secrets/redis_url
   # Empty for private plaintext Redis in this phase. Optional private CA for rediss://.
   REDIS_CA_FILE: ${REDIS_CA_FILE:-}
-  CONTROL_ORIGIN: ${CONTROL_ORIGIN:-https://example.com}
+  INTEGRATIONS: ${INTEGRATIONS:?Set exact origin-to-site INTEGRATIONS JSON}
   RUNTIME_ORIGIN: https://${RUNTIME_HOST:-proxy.example.net}
   SESSION_SECONDS: ${SESSION_SECONDS:-1800}
   BYTE_LIMIT: ${BYTE_LIMIT:-104857600}
@@ -55,12 +55,14 @@ services:
     security_opt: [no-new-privileges:true]
   api:
     <<: *app
-    networks: [ingress, session_state]
+    networks: [ingress, session_state, egress]
     environment:
       <<: *env
       ROLE: api
       REPLICA: api
-    secrets: [redis_url]
+      RECAPTCHA_SITE_KEY: ${RECAPTCHA_SITE_KEY:?Set the public reCAPTCHA v2 site key}
+      RECAPTCHA_SECRET_FILE: /run/secrets/recaptcha_secret
+    secrets: [redis_url, recaptcha_secret]
   gateway-a:
     <<: *app
     environment:
@@ -76,6 +78,8 @@ services:
       REPLICA: gateway-b
     secrets: [redis_url, shifter_credentials]
 secrets:
+  recaptcha_secret:
+    file: ${RECAPTCHA_SECRET_FILE:?Set the path to the private reCAPTCHA secret}
   redis_url:
     file: ${REDIS_URL_SECRET_FILE:?Set REDIS_URL_SECRET_FILE}
   shifter_credentials:

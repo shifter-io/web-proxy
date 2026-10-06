@@ -18,6 +18,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 url = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat", "rt"] }
 toml = "0.9"
@@ -25,6 +28,9 @@ tower-http = { version = "0.6", features = ["cors", "fs", "set-header"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 wisp-mux = { git = "https://github.com/MercuryWorkshop/epoxy-tls", rev = "0c11678d72a636c3a4bc723db87e03e7b888eaf9", default-features = false }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
 
 [profile.release]
 lto = "thin"

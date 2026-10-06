@@ -3,7 +3,7 @@ import {writeFile} from 'node:fs/promises';
 import {docker} from './docker.mjs';
 import {assertRedisPrivate} from './redis-network-policy.mjs';
 let productionRejected=false;
-try {await docker(['run','--rm','-e','APP_ENV=production','shifter-web:local']);}
+try {await docker(['run','--rm','-e','APP_ENV=production',process.env.CONFIG_TEST_IMAGE || 'shifter-web:local']);}
 catch(error){productionRejected=String(error.stderr||error.message).includes('production requires HTTPS');}
 assert.ok(productionRejected);
 const ids=(await docker(['compose','ps','-q'])).trim().split('\n');
@@ -11,6 +11,19 @@ const containers=JSON.parse(await docker(['inspect',...ids]));
 const gateways=containers.filter(c=>c.Name.includes('-gateway-'));
 assert.equal(gateways.length,2);
 assert.ok(gateways.every(c=>c.Mounts.some(m=>m.Destination==='/run/secrets/shifter_credentials'&&m.RW===false)));
+for (const c of containers) {
+  const isApi = c.Config.Labels['com.docker.compose.service'] === 'api';
+  for (const mount of c.Mounts) {
+    if (mount.Destination.startsWith('/run/secrets/')) {
+      assert.equal(mount.RW, false, 'Secret mounts must be read-only');
+    }
+    if (mount.Destination === '/run/secrets/recaptcha_secret') {
+      assert.ok(isApi, 'Only the API may mount the CAPTCHA secret');
+    }
+    assert.ok(!mount.Destination.startsWith('/app/web/') || !/secret|\.env/i.test(mount.Source), 'Secrets must not be mounted under the public web directory');
+  }
+  assert.ok(!c.Config.Env.some(value=>value.startsWith('RECAPTCHA_SECRET_KEY=')), 'Raw CAPTCHA secrets must not be placed in container environment metadata');
+}
 assert.ok(containers.every(c=>Object.values(c.NetworkSettings.Ports||{}).every(bindings=>!bindings||bindings.every(b=>b.HostIp==='127.0.0.1'))));
 const service=c=>c.Config.Labels['com.docker.compose.service'];
 const redis=containers.find(c=>service(c)==='redis');assert.ok(redis,'Redis container must exist');

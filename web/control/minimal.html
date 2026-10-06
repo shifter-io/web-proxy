@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Web Proxy — minimal integration</title>
+<style>body{margin:24px;font:16px system-ui;background:#f4f6fa;color:#182332}form,nav{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0}input{flex:1;min-width:180px}input,select,button{padding:10px;border:1px solid #b6c3d4;border-radius:6px;background:white}#view{height:70vh;background:white;border:1px solid #ccd3dd}#status{min-height:24px}button{cursor:pointer}</style></head>
+<body><h1>Browse from another country</h1><form id="search"><input id="url" placeholder="Website URL" required aria-label="Website URL"><select id="country" aria-label="Exit country"></select><button id="go" disabled>Search</button></form>
+<nav aria-label="Browser controls"><button data-action="back">Back</button><button data-action="forward">Forward</button><button data-action="reload">Reload</button><button data-action="stop">End session</button></nav><p id="status" role="status"></p><div id="view"></div>
+<script src="/sdk/v1/shifter-web-proxy.js"></script><script>
+const proxy = ShifterWebProxy.create({container:document.querySelector('#view')});
+const countries = document.querySelector('#country'), status = document.querySelector('#status');
+let configured = false;
+proxy.subscribe(state => {
+  if (!countries.options.length) for (const country of state.countries) countries.add(new Option(country.name,country.code,country.code==='us',country.code==='us'));
+  document.querySelector('#go').disabled = !configured || state.busy;
+  for (const button of document.querySelectorAll('[data-action]')) button.disabled = !state.active || state.busy;
+  status.textContent = state.error?.message || `${state.status} · ${state.remainingSeconds || 0}s remaining`;
+});
+proxy.init().then(() => {configured=true;document.querySelector('#go').disabled=false;}).catch(error => status.textContent=error.message);
+document.querySelector('#search').onsubmit = event => {event.preventDefault();proxy.search({url:document.querySelector('#url').value,country:countries.value}).catch(error => {if(error.code!=='CANCELLED')status.textContent=error.message;});};
+for (const button of document.querySelectorAll('[data-action]')) button.onclick=()=>proxy[button.dataset.action]().catch(error=>status.textContent=error.message);
+</script></body></html>

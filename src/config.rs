@@ -83,6 +83,9 @@ pub struct Config {
     pub redis: String,
     pub redis_ca_file: Option<String>,
     pub control_origin: String,
+    pub integrations: Vec<Integration>,
+    pub captcha_site_key: String,
+    pub captcha_secret: String,
     pub runtime_origin: String,
     pub region: String,
     pub upstream_host: String,
@@ -100,6 +103,52 @@ pub struct Config {
     pub test_mode: bool,
     pub web_dir: String,
 }
+#[derive(Clone, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Integration {
+    pub origin: String,
+    pub site: String,
+}
+
+pub fn integrations(value: &str, runtime: &str, production: bool) -> Result<Vec<Integration>> {
+    let entries: Vec<Integration> =
+        serde_json::from_str(value).map_err(|_| anyhow::anyhow!("invalid INTEGRATIONS JSON"))?;
+    if entries.is_empty() {
+        bail!("INTEGRATIONS must not be empty");
+    }
+    let mut origins = std::collections::HashSet::new();
+    let mut sites = std::collections::HashSet::new();
+    for entry in &entries {
+        validate_origins(&entry.origin, runtime, production)?;
+        if !origins.insert(&entry.origin)
+            || !sites.insert(&entry.site)
+            || entry.site.is_empty()
+            || entry.site.len() > 64
+            || !entry
+                .site
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+        {
+            bail!("INTEGRATIONS requires unique origins and unique alphanumeric site IDs");
+        }
+    }
+    Ok(entries)
+}
+
+pub fn validate_captcha(site_key: &str, secret: &str, production: bool) -> Result<()> {
+    const TEST_SITE: &str = "6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI";
+    const TEST_SECRET: &str = "6LeIxAcTAAAAAGG-vFI1TnRWxMZNFuojJ4WifJWe";
+    if production
+        && (site_key.is_empty()
+            || secret.is_empty()
+            || site_key == TEST_SITE
+            || secret == TEST_SECRET)
+    {
+        bail!("production API requires real reCAPTCHA v2 credentials");
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 struct Secrets {
     shifter: Account,
@@ -131,7 +180,16 @@ impl Config {
         let production = environment == "production";
         let control_origin = val("CONTROL_ORIGIN", "http://localhost:8080");
         let runtime_origin = val("RUNTIME_ORIGIN", "http://localhost:8081");
-        validate_origins(&control_origin, &runtime_origin, production)?;
+        let default_integrations = if production {
+            r#"[{"origin":"https://example.com","site":"shifter"},{"origin":"https://second.example.com","site":"ip-info"}]"#.to_owned()
+        } else {
+            serde_json::json!([{"origin":control_origin,"site":"local"}]).to_string()
+        };
+        let integrations = integrations(
+            &val("INTEGRATIONS", &default_integrations),
+            &runtime_origin,
+            production,
+        )?;
         let redis = match env::var("REDIS_URL_FILE") {
             Ok(path) => std::fs::read_to_string(path)
                 .map_err(|_| anyhow::anyhow!("cannot read REDIS_URL_FILE"))?
@@ -153,6 +211,22 @@ impl Config {
         let role = val("ROLE", "api");
         if !["api", "gateway"].contains(&role.as_str()) {
             bail!("invalid ROLE");
+        }
+        let captcha_site_key = val("RECAPTCHA_SITE_KEY", "");
+        // Only the API process receives the verification secret.
+        let captcha_secret = if role == "api" {
+            match env::var("RECAPTCHA_SECRET_FILE") {
+                Ok(path) if !path.is_empty() => std::fs::read_to_string(path)
+                    .map_err(|_| anyhow::anyhow!("cannot read RECAPTCHA_SECRET_FILE"))?
+                    .trim()
+                    .to_owned(),
+                _ => String::new(),
+            }
+        } else {
+            String::new()
+        };
+        if role == "api" {
+            validate_captcha(&captcha_site_key, &captcha_secret, production)?;
         }
         let region = val("SHIFTER_REGION", "blr");
         if !["fra", "ams", "lon", "nyc", "tor", "sgp", "blr", "syd"].contains(&region.as_str()) {
@@ -212,6 +286,9 @@ impl Config {
             redis,
             redis_ca_file: env::var("REDIS_CA_FILE").ok().filter(|v| !v.is_empty()),
             control_origin,
+            integrations,
+            captcha_site_key,
+            captcha_secret,
             runtime_origin,
             region,
             upstream_host,
@@ -260,6 +337,7 @@ fn validate_origins(control: &str, runtime: &str, production: bool) -> Result<()
         let parsed = url::Url::parse(origin).context("invalid application origin")?;
         if !["http", "https"].contains(&parsed.scheme())
             || parsed.origin().ascii_serialization() != origin
+            || parsed.host_str().is_none_or(|host| host.contains('*'))
         {
             bail!(
                 "application origins must contain only scheme and host (plus optional port), without trailing slash"
@@ -316,6 +394,33 @@ fn private_ip(ip: IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn integrations_and_captcha_are_strict() {
+        let value = r#"[{"origin":"https://example.com","site":"shifter"},{"origin":"https://second.example.com","site":"ip-info"}]"#;
+        assert_eq!(
+            integrations(value, "https://proxy.example.net", true)
+                .unwrap()
+                .len(),
+            2
+        );
+        for value in [
+            "[]",
+            r#"[{"origin":"https://*.example.com","site":"x"}]"#,
+            r#"[{"origin":"http://example.com","site":"x"}]"#,
+            r#"[{"origin":"https://example.com/","site":"x"}]"#,
+            r#"[{"origin":"https://example.com","site":"x:y"}]"#,
+        ] {
+            assert!(integrations(value, "https://proxy.example.net", true).is_err());
+        }
+        assert!(validate_captcha("", "", true).is_err());
+        assert!(
+            validate_captcha("6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI", "fixture", true).is_err()
+        );
+        assert!(
+            validate_captcha("fixture", "6LeIxAcTAAAAAGG-vFI1TnRWxMZNFuojJ4WifJWe", true).is_err()
+        );
+    }
 
     #[test]
     fn production_requires_distinct_https_origins() {

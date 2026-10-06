@@ -1,20 +1,22 @@
 (async () => {
-  const config = await fetch('/settings').then(r => r.json());
-  const send = (type,data = {}) => parent.postMessage({source:'shifter-runtime',type,...data},config.controlOrigin);
+  let bridge;
+  try { bridge = await createRuntimeBridge(); }
+  catch { document.getElementById('loading').textContent = 'This browsing frame is not authorized.'; return; }
+  const send = bridge.send;
   let frame, connection, started = false;
   try {
     const { ScramjetController } = $scramjetLoadController();
-    const scramjet = new ScramjetController({prefix:'/service/',files:{wasm:'/vendor/scram/scramjet.wasm.wasm',all:'/vendor/scram/scramjet.all.js',sync:'/vendor/scram/scramjet.sync.js'}});
+    const scramjet = new ScramjetController({flags:{syncxhr:false},prefix:'/service/',files:{wasm:'/vendor/scram/scramjet.wasm.wasm',all:'/vendor/scram/scramjet.all.js',sync:'/vendor/scram/scramjet.sync.js'}});
     await scramjet.init();
     await navigator.serviceWorker.register('/sw.js');
     await navigator.serviceWorker.ready;
     if (!navigator.serviceWorker.controller) await new Promise(resolve => navigator.serviceWorker.addEventListener('controllerchange',resolve,{once:true}));
     connection = new BareMux.BareMuxConnection('/vendor/baremux/worker.js');
     window.addEventListener('message', async event => {
-      if (event.origin !== config.controlOrigin || event.source !== parent || event.data?.source !== 'shifter-control') return;
+      if (!bridge.accepts(event)) return;
       const {command,ticket,url} = event.data;
       try {
-        if (command === 'clear') { frame?.frame.remove(); location.replace('/reset.html#stop'); return; }
+        if (command === 'clear') { frame?.frame.remove(); location.replace('/reset.html?' + bridge.query + '#stop'); return; }
         if ((command === 'start' && !started) || command === 'reconnect') {
           started = true;
           frame?.frame.remove();

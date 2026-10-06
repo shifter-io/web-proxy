@@ -3,7 +3,7 @@
 // No destination streams are opened and no paid upstream traffic is generated.
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
-import {randomBytes} from 'node:crypto';
+import {randomBytes,createHash} from 'node:crypto';
 import {mkdir, mkdtemp, readFile, writeFile, rm} from 'node:fs/promises';
 import path from 'node:path';
 import https from 'node:https';
@@ -11,6 +11,7 @@ import http from 'node:http';
 import WebSocket from 'ws';
 import {docker} from './docker.mjs';
 import {assertRedisPrivate} from './redis-network-policy.mjs';
+import {assertPrivateFilesDenied} from './public-files.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 process.chdir(root);
@@ -40,6 +41,7 @@ async function cert(name, san) {
   openssl(['x509','-req','-in',`${name}.csr`,'-CA','ca.crt','-CAkey','ca.key','-CAcreateserial','-out',`${name}.crt`,'-days','2','-extfile',`${name}.ext`]);
 }
 let networkCreated = false;
+const sockets = new Set(), websockets = new Set();
 try {
   openssl(['req','-x509','-newkey','rsa:2048','-nodes','-keyout','ca.key','-out','ca.crt','-days','2','-subj','/CN=Local HTTPS test CA','-addext','basicConstraints=critical,CA:TRUE']);
   await cert('ingress',`DNS:${runtime}`);
@@ -50,11 +52,12 @@ try {
   await writeFile(file('tls-url'),`rediss://proxy:${secret}@redis:6380/0`);
   await writeFile(file('bad-password'),`redis://proxy:wrong@redis:6379/0`);
   await writeFile(file('bad-hostname'),`rediss://proxy:${secret}@wrong-redis:6380/0`);
-  await writeFile(file('redis.acl'),`user default off\nuser proxy on >${secret} ~daily:* ~ticket:* +ping +hello +select +client|setinfo +evalsha +script|load +exists +hset +pexpireat +hget +hincrby +hgetall +hdel +setex +getdel\n`);
+  await writeFile(file('redis.acl'),`user default off\nuser proxy on >${secret} ~daily:* ~ticket:* ~identity:* ~captcha:* +get +set +ping +hello +select +client|setinfo +evalsha +script|load +exists +hset +pexpireat +hget +hincrby +hgetall +hdel +setex +getdel\n`);
+  await writeFile(file('recaptcha-secret'),randomBytes(32).toString('hex'));
   await writeFile(file('redis.conf'), 'bind 0.0.0.0\nprotected-mode yes\nport 6379\ntls-port 6380\ntls-cert-file /fixtures/redis.crt\ntls-key-file /fixtures/redis.key\ntls-ca-cert-file /fixtures/ca.crt\ntls-auth-clients no\naclfile /fixtures/redis.acl\nsave ""\nappendonly no\n');
   // Redis's unprivileged image user needs its generated fixture key; these are disposable keys.
   execFileSync('chmod',['644',file('redis.key')]);
-  await writeFile(file('test.env'),`CONTROL_ORIGIN=https://${control}\nRUNTIME_HOST=${runtime}\nTLS_CERT_DIR=${file('https')}\nREDIS_NETWORK=${network}\nREDIS_URL_SECRET_FILE=${file('redis-url')}\nREDIS_TLS_DIR=${dir}\nREDIS_CA_FILE=${redisTls?'/run/redis-tls/ca.crt':''}\nSHIFTER_CREDENTIALS_FILE=${path.join(root,'tests/fixtures/credentials.example.toml')}\n`);
+  await writeFile(file('test.env'),`INTEGRATIONS='[{"origin":"https://example.com","site":"shifter"},{"origin":"https://second.example.com","site":"ip-info"}]'\nRECAPTCHA_SITE_KEY=synthetic-non-google-site-key\nRECAPTCHA_SECRET_FILE=${file('recaptcha-secret')}\nRUNTIME_HOST=${runtime}\nTLS_CERT_DIR=${file('https')}\nREDIS_NETWORK=${network}\nREDIS_URL_SECRET_FILE=${file('redis-url')}\nREDIS_TLS_DIR=${dir}\nREDIS_CA_FILE=${redisTls?'/run/redis-tls/ca.crt':''}\nSHIFTER_CREDENTIALS_FILE=${path.join(root,'tests/fixtures/credentials.example.toml')}\n`);
   // Override only image, local published ports and fixture mounts. Use production app settings.
   await writeFile(file('override.yaml'),`services:
   haproxy:
@@ -89,9 +92,10 @@ try {
     ? callback(null,[{address:'127.0.0.1',family:4}]) : callback(null,'127.0.0.1',4);
   async function request(host, route, {plain=false,method='GET',headers={},body,trust=ca}={}) {
     return new Promise((resolve,reject) => {
-      const req=(plain?http:https).request({hostname:host,servername:host,port:plain?httpPort:tlsPort,path:route,method,ca:trust,lookup,headers:{Host:host,...headers},timeout:10000},res=>{
+      const req=(plain?http:https).request({hostname:host,servername:host,port:plain?httpPort:tlsPort,path:route,method,ca:trust,lookup,headers:{Host:host,...headers},agent:false,timeout:10000},res=>{
         let data='';res.on('data',chunk=>data+=chunk);res.on('end',()=>resolve({status:res.statusCode,headers:res.headers,body:data}));
       });
+      req.on('socket',socket=>sockets.add(socket));
       req.on('error',reject);req.on('timeout',()=>req.destroy(new Error('request timed out')));
       req.end(body===undefined?undefined:JSON.stringify(body));
     });
@@ -104,29 +108,50 @@ try {
     assert.equal((await request(host,'/metrics')).status,403);
   }
   assert.equal((await request(runtime,'/',{headers:{Host:'unexpected.example'}})).status,421);
+  await assertPrivateFilesDenied((route, options) => request(runtime, route, options));
   assert.equal((await request('unexpected.example','/',{plain:true})).status,421);
   await assert.rejects(request(runtime,'/',{trust:''}));
-  const preflight=await request(runtime,'/api/sessions',{method:'OPTIONS',headers:{Origin:`https://${control}`,'Access-Control-Request-Method':'POST','Access-Control-Request-Headers':'content-type'}});
+  for (const siteKey of ['', '6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI']) {
+    let rejected=false;
+    try { await dc(['run','--rm','--no-deps','-e',`RECAPTCHA_SITE_KEY=${siteKey}`,'api']); }
+    catch(error) { rejected=String(error.stderr || '').includes('requires real reCAPTCHA'); }
+    assert.ok(rejected,'Production must reject missing/public test CAPTCHA keys');
+  }
+  const loader=await request(runtime,'/sdk/v1/shifter-web-proxy.js');
+  assert.equal(loader.status,200);assert.match(loader.headers['cache-control'],/no-cache/);
+  const release=await request(runtime,'/sdk/releases/1.0.0/client.js');
+  assert.equal(release.status,200);assert.match(release.headers['cache-control'],/immutable/);
+  const preflight=await request(runtime,'/api/v1/sessions',{method:'OPTIONS',headers:{Origin:`https://${control}`,'Access-Control-Request-Method':'POST','Access-Control-Request-Headers':'content-type,authorization'}});
   assert.equal(preflight.headers['access-control-allow-origin'],`https://${control}`);
-  assert.equal(preflight.headers['access-control-allow-credentials'],'true');
-  const foreign=await request(runtime,'/api/sessions',{method:'POST',headers:{Origin:'https://wrong.example','Content-Type':'application/json'},body:{country:'us'}});
+  assert.equal(preflight.headers['access-control-allow-credentials'],undefined);
+  assert.match(preflight.headers['access-control-allow-headers'],/authorization/);
+  const foreign=await request(runtime,'/api/v1/sessions',{method:'POST',headers:{Origin:'https://wrong.example','Content-Type':'application/json'},body:{country:'us',captchaToken:'invalid'}});
   assert.equal(foreign.status,403);
   assert.notEqual(foreign.headers['access-control-allow-origin'],'https://wrong.example');
-  const started=await request(runtime,'/api/sessions',{method:'POST',headers:{Origin:`https://${control}`,'Content-Type':'application/json'},body:{country:'us'}});
-  assert.equal(started.status,200,started.body);
-  assert.equal(JSON.parse(started.body).developmentIdentity,true);
-  const cookie=started.headers['set-cookie'][0];assert.match(cookie,/; Secure/);assert.match(cookie,/HttpOnly/);
-  const apiHeaders={Origin:`https://${control}`,Cookie:cookie.split(';')[0]};
-  assert.equal(started.headers['access-control-allow-origin'],`https://${control}`);
-  const ticketResponse=await request(runtime,'/api/session/tickets',{method:'POST',headers:apiHeaders});
+  // Production must not expose the development-cookie or synthetic CAPTCHA path.
+  assert.equal((await request(runtime,'/api/sessions',{method:'POST',headers:{Origin:`https://${control}`,'Content-Type':'application/json'},body:{country:'us'}})).status,404);
+  assert.equal((await request(runtime,'/api/v1/sessions',{method:'POST',headers:{Origin:`https://${control}`,'Content-Type':'application/json'},body:{country:'us',captchaToken:''}})).status,400);
+  const rcmd=(...args)=>dc(['exec','-T','-e',`REDISCLI_AUTH=${secret}`,'redis','redis-cli','--user','proxy','-h','redis','--raw',...args]);
+  // Seed a verified identity directly in disposable private storage, never via a production bypass.
+  const credential=randomBytes(32).toString('hex'), visitor=randomBytes(16).toString('hex');
+  await rcmd('SETEX',`identity:${createHash('sha256').update(credential).digest('hex')}`,'3600',JSON.stringify({site:'shifter',visitor}));
+  const key=`daily:shifter:${visitor}:${Math.floor(Date.now()/86400000)}`;
+  await rcmd('HSET',key,'country','us','sid',randomBytes(16).toString('hex'),'region','blr','exp',String(Date.now()+600000),'rev','1','used','0','limit','104857600','stopped','0');
+  const apiHeaders={Origin:`https://${control}`,Authorization:`Bearer ${credential}`};
+  const status=await request(runtime,'/api/v1/session',{headers:apiHeaders});
+  assert.equal(status.status,200);assert.equal(status.headers['set-cookie'],undefined);
+  assert.equal((await request(runtime,'/api/v1/session',{headers:{...apiHeaders,Origin:'https://second.example.com'}})).status,401);
+  const ticketResponse=await request(runtime,'/api/v1/session/tickets',{method:'POST',headers:apiHeaders});
   assert.equal(ticketResponse.status,200,ticketResponse.body);
   const ticket=JSON.parse(ticketResponse.body).ticket;
   async function websocket(ticket, origin=`https://${runtime}`) {
     return new Promise((resolve,reject)=>{
       const ws=new WebSocket(`wss://${runtime}:${tlsPort}/wisp/${ticket}/`,{ca,lookup,headers:{Host:runtime},origin,handshakeTimeout:10000});
+      websockets.add(ws);
+      ws.on('upgrade',response=>sockets.add(response.socket));
       ws.on('error',()=>{});
       ws.once('open',()=>{ws.close();resolve(101);});
-      ws.once('unexpected-response',(_,res)=>{res.resume();ws.terminate();resolve(res.statusCode);});
+      ws.once('unexpected-response',(_,res)=>{const status=res.statusCode;res.destroy();ws.terminate();resolve(status);});
       ws.once('error',reject);
     });
   }
@@ -155,10 +180,10 @@ try {
   assert.match(await dc(['exec','-T','redis','redis-cli','-h','redis','PING']),/NOAUTH/);
   // Stop only this disposable fixture; the API must fail closed on lost quota storage.
   await dc(['stop','redis']);
-  assert.equal((await request(runtime,'/api/session/tickets',{method:'POST',headers:apiHeaders})).status,503);
+  assert.equal((await request(runtime,'/api/v1/session/tickets',{method:'POST',headers:apiHeaders})).status,503);
   const logs=await dc(['logs','--no-color','api','gateway-a','gateway-b','haproxy']);
   assert.ok(!logs.includes(secret) && !logs.includes(ticket),'credentials/tickets must not appear in logs');
-  const result={passed:true,https:true,redirects:true,secureCookies:true,credentialedCors:true,authenticatedWss:true,singleUseTickets:true,redisAcl:true,redisTls,rejectBadPassword:true,rejectWrongHostname:true,rejectUntrustedCa:true,redisPrivate:true,redisUnreachableFromHAProxy:true,storageFailureClosed:true};
+  const result={passed:true,https:true,redirects:true,cookieFreeBearer:true,exactCors:true,legacyApiDisabled:true,authenticatedWss:true,singleUseTickets:true,redisAcl:true,redisTls,rejectBadPassword:true,rejectWrongHostname:true,rejectUntrustedCa:true,redisPrivate:true,redisUnreachableFromHAProxy:true,storageFailureClosed:true};
   await writeFile(path.join(root,`artifacts/https-deployment${redisTls?'-redis-tls':''}.json`),JSON.stringify(result,null,2));
   console.log(JSON.stringify(result));
 } catch (error) {
@@ -167,6 +192,8 @@ try {
   console.error(String(error).replaceAll(secret,'[redacted]'));
   throw error;
 } finally {
+  for (const ws of websockets) ws.terminate();
+  for (const socket of sockets) socket.destroy();
   await dc(['down','--volumes','--remove-orphans']).catch(()=>{});
   if (networkCreated) await docker(['network','rm',network]);
   await rm(dir,{recursive:true,force:true,maxRetries:10,retryDelay:250});

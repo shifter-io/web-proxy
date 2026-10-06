@@ -1,0 +1,12 @@
+# Optional local development overlay for real Google v2 verification.
+# docker compose -f compose.example.yaml -f compose.captcha.example.yaml up -d
+# Add localhost to your development key's Google domain registration.
+services:
+  api:
+    environment:
+      RECAPTCHA_SITE_KEY: ${RECAPTCHA_SITE_KEY:?Set the public v2 site key}
+      RECAPTCHA_SECRET_FILE: /run/secrets/recaptcha_secret
+    secrets: [recaptcha_secret]
+secrets:
+  recaptcha_secret:
+    file: ${RECAPTCHA_SECRET_FILE:?Set a local file containing only the private v2 secret}

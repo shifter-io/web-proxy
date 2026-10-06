@@ -10,7 +10,8 @@
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="preload" href="/assets/geist-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/style.css">
-  <script type="module" src="/app.js"></script>
+  <script src="/sdk/v1/shifter-web-proxy.js"></script>
+<script type="module" src="/app.js"></script>
 </head>
 <body>
 <svg class="svg-library" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
@@ -90,7 +91,7 @@
           <span class="sr-only">Loading your website. Please wait.</span>
         </div>
         <div id="empty" class="viewport-message"><svg class="icon"><use href="#globe"/></svg><h2>Preparing your destination</h2><p>Your website will appear here.</p></div>
-        <iframe id="runtime" title="Proxied browsing session" hidden sandbox="allow-scripts allow-same-origin allow-forms allow-downloads" allow="cross-origin-isolated"></iframe>
+        <div id="runtime-host" hidden></div>
         <div id="expired" class="viewport-message" hidden><svg class="icon"><use href="#globe"/></svg><h2>Your free browsing window has ended.</h2><p>You’ve reached today’s time or data allowance.<br>Come back tomorrow, or explore more with Shifter.</p><a class="button" href="https://shifter.io/services/residential-proxies">Explore Shifter <svg class="icon"><use href="#arrow"/></svg></a><button id="expired-home" class="text-button">Back to the web proxy</button></div>
       </div>
     </section>
@@ -151,14 +152,7 @@
   </div>
 </main>
 <footer class="site-footer landing-only"><div class="footer-top"><a href="https://shifter.io" aria-label="Shifter home"><img src="/assets/shifter-logo.svg" alt="Shifter" width="104" height="28"></a><p>A different perspective. Powered by Shifter.</p><a href="https://shifter.io/docs">Knowledge Base</a><a href="https://shifter.io/terms-and-conditions">Terms of Service</a><a href="https://shifter.io/privacy-policy">Privacy Policy</a></div><div class="footer-bottom"><span>© 2026 Shifter. All rights reserved.</span><span>Design preview · CAPTCHA integration pending</span></div></footer>
-<dialog id="verification" aria-labelledby="verification-title" aria-describedby="verification-description">
-  <button id="verification-close" class="modal-close icon-button" type="button" aria-label="Close verification"><svg class="icon" aria-hidden="true"><use href="#close"/></svg></button>
-  <div class="modal-icon"><svg class="icon"><use href="#shield"/></svg></div>
-  <span class="section-label">ONE QUICK CHECK</span>
-  <h2 id="verification-title">Ready to explore?</h2>
-  <p id="verification-description">Complete the check below. Your website will open automatically.</p>
-  <label class="captcha-preview"><input id="captcha" type="checkbox" autofocus><span>I’m not a robot<small>CAPTCHA preview · not live verification</small></span><svg class="icon"><use href="#shield"/></svg></label>
-</dialog>
+
 
 </body>
 </html>

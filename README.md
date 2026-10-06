@@ -4,13 +4,14 @@ A web proxy that combines **Scramjet in the browser**, **HAProxy (local TCP or H
 
 Visitors enter a website, choose an exit country, and browse inside the page without configuring their browser’s proxy settings. Each visitor receives a server-generated sticky session ID. The gateway adds the upstream credentials and country targeting on the server.
 
-**Status: HTTPS/WSS deployment support implemented; verified identity/CAPTCHA deferred for the current production phase. Backend validation passed; final browser acceptance is incomplete.** Earlier browser runs experienced Wisp disconnections after navigation or idle. A WebSocket keepalive was added, but its final browser regression and the complete cookie-cleanup sequence remain unverified. HTTPS transport does not provide abuse protection; the development-cookie identity remains active.
+**Status: shared browser SDK and server-verified reCAPTCHA v2 implemented.** The hosted entry point is `/sdk/v1/shifter-web-proxy.js`, exposing `ShifterWebProxy.create()`. Production API access uses origin-bound anonymous bearer credentials; the legacy cookie API exists only in synthetic test mode. Production activation still requires real CAPTCHA credentials and final acceptance on both websites. This does not establish a unique-person identity or universal destination compatibility.
 
 An offline HTML version of this README is included at [docs/readme.html](docs/readme.html).
 
 ## Contents
 
 - [What is included](#what-is-included)
+- [Shared SDK integration](#shared-sdk-integration)
 - [Architecture](#architecture)
 - [Repository and secret policy](#repository-and-secret-policy)
 - [Requirements](#requirements)
@@ -42,23 +43,73 @@ An offline HTML version of this README is included at [docs/readme.html](docs/re
 - Explicit, bounded live smoke tests for country targeting, sampled sticky IP behavior, and TLS forwarding.
 - Example configuration files and a bootstrap script that creates ignored local copies.
 
-Live CAPTCHA verification and verified Fingerprint identity are not configured. The CAPTCHA shown on the landing page is explicitly a design preview.
+The SDK includes reCAPTCHA v2; live use requires configured credentials. Fingerprint identity is not part of this integration.
 
 ## Web proxy page example
 
-The control page now follows the Astro Shifter website’s design: its SVG logo, Geist typography, blue accent, dark surfaces, and Products / Solutions / Pricing / Resources navigation. The three-step section ports the existing `SectionHeader` and `ProductFeaturesSection` styles and scroll-reveal timings, including the gradient heading, icon tiles, card hover effects, and staggered reveal; only its copy and icons change. The reference is `Microleaves/landing` at commit `b8f44c52`; the Astro website itself has not been modified.
+`web/control/index.html` retains the Shifter landing page and browser toolbar. Its `app.js` is a UI adapter: it consumes SDK state and invokes methods; API calls, CAPTCHA, runtime messages, polling, expiry, and cleanup live in the SDK. `web/control/minimal.html` demonstrates a different interface using the same library.
 
-Open **http://localhost:8080** to review the landing page, search widget, explanatory content, and FAQs. Choose a country, enter a website, and press **Search**. The CAPTCHA preview modal opens directly, including on a first visit. Selecting its checkbox closes the modal and starts browsing automatically, without an extra Continue button. The top-right X or Escape returns without starting a session, and each new landing-page Search resets the check. There is no separate welcome dialog or additional confirmation step.
+Search validates the address and opens the library-owned reCAPTCHA v2 modal. Closing it or pressing Escape cancels. A successful challenge is verified by the API before browsing starts. Navigation, reload, and location changes within an active session do not require another challenge. Every landing-page Search does. Failed or unavailable CAPTCHA never grants access.
 
-Starting a session expands the page into a viewport-filling browser. A centered Shifter logo and animated Loading dots cover the destination during startup, navigation, reloads, and location changes. The overlay clears when the destination iframe loads, on errors or expiry, or after a 25-second timeout. Reduced-motion preferences keep the logo and dots static. Its toolbar provides Back, Forward, Reload, country selection, a URL field, remaining allowance, and End session. The **Shifter logo** returns to the landing page while the session continues; **Return to your browsing session** reopens it. The branded toolbar stays on one row. On small screens the Shifter icon remains visible and a compact menu contains Back, Forward, Reload, remaining allowance, and End session. The destination fills the remaining dynamic viewport, with scrolling inside the destination.
+The browser retains Back, Forward, Reload, country selection, the URL field, time/data allowance, End session, return-to-home, and resume controls. The website owns these visuals and the loading overlay. The SDK owns the destination iframe and emits state for the website to render.
 
-Below the search bar, all eligible countries appear in three looping rows of circular flags and names, moving right, left, and right. Hover stops motion; reduced-motion preferences provide static, horizontally scrollable rows. Repeated visual copies are hidden from assistive technology. The following brand section pairs Shifter copy with its icon surrounded by the top 12 eligible countries on three circular orbits. The rings alternate clockwise/counterclockwise/clockwise, while the flags stay upright. Hover pauses the rings, and reduced-motion preferences disable their animation.
+## Shared SDK integration
 
-The CAPTCHA checkbox in the modal is an interaction preview, not abuse protection or server verification. Verified identity/CAPTCHA is deferred for the current production phase; the checkbox does not grant server-verified identity. The local example uses `noindex,nofollow`; remove that only when an approved public route and production controls exist. SEO copy is static HTML below the hero. The menu uses the source site’s destinations; the eventual Astro integration should reuse its actual navigation and footer components.
+Initially only `https://example.com` and `https://second.example.com` are allowed in production. No `www`, HTTP, wildcard, or other subdomain is implicitly included. Loading the public JavaScript does not grant authorization; API and runtime origins are checked separately.
 
-Brand assets are served locally from `web/control/assets/`. The SVG comes from the pulled Astro component; the self-hosted Geist Latin font is the website’s deployed font asset. No external font or UI CDN is needed.
+```html
+<div id="proxy-view" style="height:70vh"></div>
+<script src="https://proxy.example.net/sdk/v1/shifter-web-proxy.js"></script>
+<script>
+const proxy = ShifterWebProxy.create({
+  container: document.querySelector('#proxy-view')
+});
+proxy.subscribe(state => {
+  // Render your controls using state.active, busy, loading, countries,
+  // country, url, session, remainingSeconds, persistent and error.
+});
+proxy.init().then(() => {
+  // Enable your Search control. Call from its submit handler:
+  // proxy.search({url: address.value, country: country.value});
+}).catch(error => console.error(error.message));
+</script>
+```
 
-The redesigned UI was checked in the integrated browser at desktop and mobile widths: CAPTCHA preview gating, cancel/reopen, viewport expansion, live destination rendering, return/resume, and ending a session. A live connection interruption recovered with Reload. A country-change run also exposed an intermittent runtime initialization failure; the UI now offers Reload during initialization and reports a timeout instead of leaving an unrecoverable blank view. These checks do not resolve the broader browser-runtime acceptance limitations listed above.
+`create()` returns immediately; `init()` waits for the selected release and configuration. Methods return promises. `subscribe(callback)` invokes the callback immediately and returns an unsubscribe function. `getState()` returns a defensive copy. One instance may own a container at a time.
+
+| Method | Contract |
+| --- | --- |
+| `init()` | Fetch allowed-site configuration and restore available allowance; does not start browsing |
+| `search({url, country})` | Validate, display CAPTCHA, authorize, and browse; rejects with `CANCELLED` on dismissal |
+| `navigate(url)` | Navigate an active session without another CAPTCHA |
+| `back()`, `forward()` | Traverse destination history |
+| `reload()` | Reconnect with the same assignment/allowance after lease release |
+| `changeCountry(country)` | Revoke old assignment, clear website state, preserve allowance, and navigate |
+| `stop()` | Revoke access and await runtime cleanup; retain anonymous identity |
+| `destroy()` | Abort SDK work, detach iframe/listeners/timers, and release the container; does not reset server allowance |
+| `subscribe(callback)`, `getState()` | Read UI state without exposing credentials or tickets |
+
+State status is `idle`, `initializing`, `ready`, `verifying`, `connecting`, `browsing`, `interrupted`, `stopped`, `expired`, `exhausted`, or `destroyed`. Errors contain `code` and `message`. Handle rejected promises; only `CANCELLED` normally needs no error message. Concurrent operations reject with `BUSY`. A storage-disabled browser uses memory and reports `persistent: false`.
+
+The default API origin is the loader's origin. `apiOrigin` is an optional local-integration override. `nonce` can be supplied for CSP-authorized injected scripts/styles; the loader inherits its script nonce by default. Neither option changes server authorization.
+
+### CAPTCHA configuration
+
+Register both website domains on the existing standard v2 checkbox key. The **site key is public**, including in GitHub. The **secret is private** and must never enter SDK code, HTML, URLs, repository files, or logs. Set `RECAPTCHA_SITE_KEY` and mount `RECAPTCHA_SECRET_FILE` only in the API container. The API needs outbound HTTPS to Google's fixed SiteVerify endpoint. Google responses must be successful, free of error codes, and match the exact caller hostname. Google enforces the response token's two-minute lifetime; the returned challenge timestamp is validated as a load timestamp, not mistaken for when the user solved it. A SHA-256 token reservation in Redis rejects concurrent replay; raw CAPTCHA responses are not stored. See [Google verification](https://developers.google.com/recaptcha/docs/verify).
+
+For local real-CAPTCHA development, add `compose.captcha.example.yaml` as an overlay, set the public key and local secret-file path in ignored configuration, and register localhost on a development key. The overlay mounts the secret only in the API. Synthetic browser tests instead use the disposable test stack; Google test tokens are not automatically accepted by its Redis-backed mock verifier.
+
+If Google reports a widget error, the SDK keeps its frame and modal open so Google's own message remains visible, and offers Try again or Close. It does not reset/remove the frame automatically on that error: doing so hides domain/key errors and produces misleading canceled network requests. Only a completed challenge can call the session API. Script-load failures and expired challenges also offer an explicit retry. For a localhost rejection, verify that the exact site key returned by the local API is the key whose domain settings you saved in Google; changing another key does not affect the running demo.
+
+Production startup rejects missing credentials and Google's public test credentials. Synthetic tests seed random one-use challenge hashes in private Redis; those records are read only in `APP_ENV=test`. There is no configurable production verifier URL or bypass switch.
+
+### Release and rollback
+
+Maintain source only under `web/sdk/src/`. `node scripts/build-sdk.mjs 1.0.1` creates/verifies immutable files and a SHA-256 manifest in `web/sdk/releases/1.0.1/`. With no argument, the script verifies the release selected by the loader. It rejects changed content for an existing version. To release an update, pass a new semantic version and change `RELEASE` in `web/sdk/v1/shifter-web-proxy.js` after validating that release.
+
+The loader uses `Cache-Control: public, no-cache`; release assets use a one-year immutable cache. Each page imports one fixed release. Rollback changes the loader's release target; existing page instances keep their release until reloaded. Retain old release directories. v1 releases must preserve protocol 1 so the runtime supports the current and previous SDK release; introduce `/sdk/v2/` for a breaking contract. Release 1.0.1 preserves CAPTCHA error frames and adds explicit retry; 1.0.0 is retained for rollback.
+
+Deploy the API and assets before changing website adapters, and disable the old production session creation at that cutover. Old cookie sessions are not imported: visitors complete a fresh CAPTCHA for a new origin-scoped identity. Update Redis ACLs before deploying; missing permissions fail closed.
 
 ## Architecture
 
@@ -115,6 +166,12 @@ Run `sh scripts/configure.sh` to generate missing local files. It never overwrit
 
 `.gitignore` excludes local YAML/CFG/TOML files, environment files, credentials directories, certificates/keys, build products, logs, artifacts, and local-only research/report files. Explicit `*.example.*` templates, dependency manifests, source, tests, and this documentation are tracked. `.dockerignore` uses a build-context allowlist so local configuration and evidence do not enter Docker builds.
 
+The HTTP server never serves the repository root. Both the API's demo and the gateway serve only explicitly allowed browser assets from their respective `web/control`, `web/runtime`, and published `web/sdk` directories. Unknown files, dotfiles, configuration, backups, SDK source directories, source maps, encoded aliases, traversal paths, and symlinked assets return 404 with `Cache-Control: no-store`. Adding a new public asset requires updating `src/public_assets.rs`; SDK releases accept numeric `major.minor.patch` directories and only the release's client, CAPTCHA module, and manifest. Runtime dependencies remain at their pinned versions.
+
+Keep `.env.captcha` and `.secrets/recaptcha-secret` outside `web/`, ignored by Git, with host permissions 600 (the `.secrets` directory should be 700). The public site key is intentionally returned by `/api/v1/config`; the private secret is mounted read-only at `/run/secrets/recaptcha_secret` only in the API container, never in gateway containers, container environment variables, or images. Docker build exclusions also cover nested secret directories, environment/configuration files, keys, backups, and database files accidentally placed beneath an allowed source directory. Production serves a read-only container filesystem; do not mount the checkout, secret directories, or writable content into public asset roots. Git ignore rules alone do not provide HTTP protection.
+
+`node tests/public-files.mjs` probes the running local demo and runtime using raw GET/HEAD paths (including traversal and percent encoding) and checks that required public assets still load. The same denial probes run against the disposable production HTTPS ingress in `tests/https-deployment.mjs`. Rust tests plant synthetic sensitive files and symlinks inside a temporary public tree to verify that the guard denies them even when present. `node tests/build-context.mjs` builds a disposable image with synthetic secret files to verify Docker's actual exclusion rules. Local validation does not verify an existing public deployment; deploy these changes before relying on them at `proxy.example.net`.
+
 Never put a real password in a template, a command-line argument, a Docker build argument, a frontend bundle, an issue, or a test-output file. Git ignore rules do not remove previously committed data: inspect the staged diff before every push.
 
 ## Requirements
@@ -124,7 +181,7 @@ Never put a real password in a template, a command-line argument, a Docker build
 - Node.js 24 when running the host-side test scripts or vendoring assets outside Docker.
 - Rust/Cargo compatible with Rust 1.94.1 when running host-side Rust checks. The Docker build includes the pinned toolchain.
 - Python 3.11 or newer for `tests/secret-scan.py`; Python 3 for the offline README renderer.
-- Available loopback ports 8080 and 8081.
+- Available loopback ports 8080 and 8081 for the normal stack, or 8180 and 8181 for the isolated SDK test runner.
 
 The build fetches pinned dependencies and base images. After the images and assets exist locally, the mock destination does not require a real upstream account or destination Internet traffic.
 
@@ -141,7 +198,7 @@ sh scripts/configure.sh
 sh scripts/stack.sh mock
 ```
 
-Open **http://localhost:8080**. Enter **http://fixture.test/**, select a country, and choose **Search**.
+Open **http://localhost:8080** to inspect the UI. Synthetic backend tests use `http://fixture.test/` and never consume paid upstream traffic. Browser Search now requires verification: the mock backend accepts only one-use challenge records seeded directly by tests, not arbitrary checkbox state or Google's public test responses. Use the disposable SDK runner below for automated checks; use the local CAPTCHA overlay for real verification.
 
 The fixture displays the configured exit country and a synthetic assignment marker. It provides a JavaScript fetch, navigation links, redirects, a synthetic username form, and a second virtual origin for cookie-isolation checks. Use only synthetic identities with the fixture.
 
@@ -218,14 +275,14 @@ mkdir -p .secrets/https .secrets/redis-tls
 Edit the ignored `.env.production` generated from `deploy/production.example.env`:
 
 - `RUNTIME_HOST=proxy.example.net` is the public gateway hostname. Point its DNS record at the ingress host. Only HAProxy publishes ports 80 and 443. The API and gateway listeners stay on the internal ingress network; gateways have a separate outbound network for Shifter.
-- `CONTROL_ORIGIN=https://example.com` is the exact original-site origin allowed to call the API and exchange messages with the runtime. Change it to the actual integration origin if needed (for example, a `www` host). It is an allowlist setting, not a hostname hosted by this stack. No separate control-page certificate or deployment is required; `web/control` remains the local integration example.
+- `INTEGRATIONS` maps exact HTTPS origins to unique stable website IDs. The portable defaults allow only `https://example.com` (`shifter`) and `https://second.example.com` (`ip-info`). Set the same mapping in API and gateways. Website IDs namespace quotas; do not rename them during an ordinary release.
 - Set `TLS_CERT_DIR` to a directory containing one or more `.pem` files, each with the full certificate chain followed by its private key. The certificate must cover `proxy.example.net` (or the configured `RUNTIME_HOST`). Provision certificates through your existing certificate manager or ACME DNS challenge workflow. The example does not issue or renew certificates automatically. Mount only the needed server PEM files, not an entire CA/ACME account directory.
 - Set `REDIS_NETWORK` to the existing Redis Docker network. It must be an internal bridge with IPv4/IPv6 gateway mode `isolated`, no Redis published ports, and only Redis/API/gateways as members. HAProxy never joins it. For Redis on separate private infrastructure, adapt the application state-network attachment and firewall policy to that deployment; the supplied Compose topology assumes a shared Docker network.
 - Set `REDIS_URL_SECRET_FILE` to an ignored file containing `redis://USER:URL_ENCODED_PASSWORD@PRIVATE_REDIS_HOST:6379/0` for the current private-network/password deployment. The hostname must resolve only to private addresses. Use a dedicated named ACL user, with unauthenticated default access disabled. No Redis TLS is required for this explicitly requested phase. Optional `rediss://` is also supported, with certificate and hostname verification.
 - Leave `REDIS_CA_FILE` empty for the current plaintext private Redis deployment. If choosing optional Redis TLS later, use `rediss://`; for a private CA place its PEM bundle at `.secrets/redis-tls/ca.crt` and set `REDIS_CA_FILE=/run/redis-tls/ca.crt`. For a system-trusted CA, leave this variable empty. TLS certificate and hostname verification cannot be disabled. Mutual TLS client certificates are not configured by this example.
 - Set `SHIFTER_CREDENTIALS_FILE` to the existing account TOML. Ensure application secret files and the CA are readable by container UID 10001, while restricting host access. HAProxy must be able to read its private keys. Never bake these files into images.
 
-The least-privilege Redis ACL tested for application traffic permits `~daily:* ~ticket:*` keys and commands `+ping +hello +select +client|setinfo +evalsha +script|load +exists +hset +pexpireat +hget +hincrby +hgetall +hdel +setex +getdel`. Apply this to a dedicated application user through your existing Redis administration process; do not replace operational or replication ACLs with this list.
+The least-privilege Redis ACL tested for application traffic permits `~daily:* ~ticket:* ~identity:* ~captcha:*` keys and commands `+get +set +ping +hello +select +client|setinfo +evalsha +script|load +exists +hset +pexpireat +hget +hincrby +hgetall +hdel +setex +getdel`. Apply this to a dedicated application user through your existing Redis administration process; do not replace operational or replication ACLs with this list.
 
 Validate configuration, build, and launch **on the intended deployment host**:
 
@@ -235,7 +292,7 @@ docker compose --env-file .env.production -f compose.production.yaml run --rm --
 docker compose --env-file .env.production -f compose.production.yaml up -d --build --wait
 ```
 
-HAProxy rejects unknown hostnames, redirects HTTP to the gateway HTTPS hostname, and terminates TLS 1.2 or later. On `proxy.example.net`, `/api/*` routes to the session API; `/wisp/*` and runtime assets route to the gateways. The control-page example is not published by this production ingress. WebSockets use HTTP/1.1 with an eleven-minute idle tunnel timeout. The browser automatically chooses WSS. HTTPS session cookies include `Secure`, `HttpOnly`, and `SameSite=Strict`. HSTS is set on backend responses. Public `/health` and `/metrics` requests are denied; backend health checks remain internal. Access logs are disabled to avoid storing Wisp tickets.
+HAProxy rejects unknown hostnames, redirects HTTP to the gateway HTTPS hostname, and terminates TLS 1.2 or later. On `proxy.example.net`, `/api/*` routes to the session API; `/wisp/*` and runtime assets route to the gateways. The control-page example is not published by this production ingress. WebSockets use HTTP/1.1 with an eleven-minute idle tunnel timeout. The browser automatically chooses WSS. The SDK uses cookie-free bearer authentication and exact-origin CORS. HSTS is set on backend responses. Public `/health` and `/metrics` requests are denied; backend health checks remain internal. Access logs are disabled to avoid storing Wisp tickets.
 
 Certificate renewal: have your certificate manager atomically replace the fullchain-plus-key `.pem` files in the mounted directory, validate with the same HAProxy command, then recreate HAProxy to load them:
 
@@ -243,29 +300,18 @@ Certificate renewal: have your certificate manager atomically replace the fullch
 docker compose --env-file .env.production -f compose.production.yaml up -d --no-deps --force-recreate haproxy
 ```
 
-Recreating HAProxy interrupts active Wisp connections. Schedule renewal deployment accordingly. The application still uses development-cookie identity in this phase and emits an explicit startup warning; CAPTCHA verification is not implemented.
+Recreating HAProxy interrupts active Wisp connections. Schedule renewal deployment accordingly. Production requires server-verified CAPTCHA and origin-bound credentials; only synthetic test mode enables the legacy cookie API.
 
-For integration into the original Shifter site, configure the example before loading `app.js`:
+Use the shared SDK integration above on either allowed website. The production ingress serves the library and runtime on `proxy.example.net`; `/api/v1/*` routes to the API service. The API has a separate outbound network for Google verification and remains attached to private Redis.
 
-```html
-<script>window.SHIFTER_API_ORIGIN = "https://proxy.example.net";</script>
-<script type="module" src="/path-to-integrated-example/app.js"></script>
-```
-
-The example sends credentialed API requests to that origin and learns the runtime origin from `/api/countries`. The API permits credentialed CORS only for `CONTROL_ORIGIN`, including JSON preflight requests; mutating endpoints still validate that exact Origin. The runtime accepts parent messages only from the same configured control origin. Without `SHIFTER_API_ORIGIN`, the example continues using local same-origin `/api` routes.
-
-The current cookie uses `SameSite=Strict`, which supports the intended HTTPS `example.com` → `proxy.example.net` integration because they share a site. Hosting the controls on a different registrable domain would need a separate cookie/integration design. Preserve the example's browser runtime requirements (including cross-origin isolation headers and iframe permissions) when moving it into the original site. Browser acceptance on the final integrated site remains outstanding.
-
-Run the local integration test without contacting production or opening destination streams through Shifter:
+Validate HTTPS locally with a disposable production-mode stack:
 
 ```sh
 docker build -t shifter-web:https-check .
-node tests/https-deployment.mjs
-node --test tests/redis-network-policy.test.mjs
-cargo test --locked
+HTTPS_TEST_REDIS_TLS=1 node tests/https-deployment.mjs
 ```
 
-The test uses disposable certificates and ACL secrets, the real production HAProxy configuration and application mode, and a private isolated Redis network with ACL/password authentication. Run again with `HTTPS_TEST_REDIS_TLS=1 node tests/https-deployment.mjs` to check the optional encrypted Redis path. It checks redirects, certificate trust, secure cookies, credentialed CORS and rejection of foreign Origins, authenticated WSS, ticket reuse rejection, invalid Redis passwords/hostnames/CAs, unauthenticated Redis rejection, application connectivity, HAProxy isolation, and failure when quota storage stops. Only loopback ingress ports are published; Redis has none. Test containers and fixture credentials are removed afterward. Passing these checks does not establish browser compatibility or validate an existing production Redis server.
+The test uses disposable certificates and ACL secrets, the real production HAProxy configuration and application mode, and a private isolated Redis network with ACL/password authentication. Run again with `HTTPS_TEST_REDIS_TLS=1 node tests/https-deployment.mjs` to check the optional encrypted Redis path. It checks redirects, certificate trust, cookie-free bearer access, exact CORS, production legacy-API rejection, and rejection of foreign Origins, authenticated WSS, ticket reuse rejection, invalid Redis passwords/hostnames/CAs, unauthenticated Redis rejection, application connectivity, HAProxy isolation, and failure when quota storage stops. Only loopback ingress ports are published; Redis has none. Test containers and fixture credentials are removed afterward. Passing these checks does not establish browser compatibility or validate an existing production Redis server.
 
 Configuration references: [HAProxy WebSocket support](https://www.haproxy.com/documentation/haproxy-configuration-tutorials/protocol-support/websocket/) and [Redis Rust 0.32.7 TLS features](https://docs.rs/crate/redis/0.32.7).
 
@@ -291,14 +337,17 @@ These advanced settings are set in the local Compose environment or supplied whe
 
 | Variable | Example/default | Meaning |
 | --- | --- | --- |
-| `APP_ENV` | `development`, `test`, or `production` | Production requires distinct HTTPS origins and private Redis with a named ACL user/password; optional Redis TLS is certificate-verified. Identity remains the development cookie. |
+| `APP_ENV` | `development`, `test`, or `production` | Production requires distinct HTTPS origins and private Redis with a named ACL user/password; optional Redis TLS is certificate-verified. The API requires real reCAPTCHA credentials; SDK identity is an origin-bound bearer credential. |
 | `ROLE` | `api` or `gateway` | Binary role |
 | `REPLICA` | `api`, `gateway-a`, `gateway-b` | Operational identity for health/metrics |
 | `LISTEN` | `0.0.0.0:3000` | Listener inside the container |
 | `REDIS_URL` | `redis://redis:6379/` | Local shared session store; production allows private `redis://` with named ACL credentials, or optional verified `rediss://` |
 | `REDIS_URL_FILE` | `/run/secrets/redis_url` in production | Read the connection URL from a secret file; takes precedence over `REDIS_URL` |
 | `REDIS_CA_FILE` | Empty (system trust) | Optional PEM CA bundle for private Redis TLS; hostname verification always remains enabled |
-| `CONTROL_ORIGIN` | `http://localhost:8080` | Exact trusted browser origin |
+| `INTEGRATIONS` | Two production websites; localhost in development | JSON array of exact `{origin, site}` mappings |
+| `CONTROL_ORIGIN` | `http://localhost:8080` | Legacy synthetic-test origin and local default only |
+| `RECAPTCHA_SITE_KEY` | Empty outside tests | Public standard v2 checkbox key; required in production |
+| `RECAPTCHA_SECRET_FILE` | None | API-only mounted secret file; required in production |
 | `RUNTIME_ORIGIN` | `http://localhost:8081` | Exact runtime/WebSocket origin |
 | `CREDENTIALS_FILE` | `/run/secrets/shifter_credentials` | In-container credential path |
 | `WEB_DIR` | `/app/web` in Docker | Static asset root |
@@ -356,7 +405,9 @@ These requirements follow the [Redis security guidance](https://redis.io/docs/la
 
 ### Identity and daily allowance
 
-The local visitor identity is an opaque first-party cookie named `shifter_dev`, with HttpOnly and SameSite=Strict attributes. This is a development identity, not verified anti-abuse identity. Deleting/replacing cookies can create another visitor; verified identity and abuse protection remain deferred for the current production phase.
+The SDK persists a server-generated 256-bit opaque credential in the embedding website's first-party local storage, scoped to API origin and website ID. Redis stores only its SHA-256 hash and an anonymous visitor/site mapping, with a 30-day expiry refreshed only after successful CAPTCHA-backed session creation. Requests omit cookies. The runtime receives only one-use tickets, never the persistent credential. Daily session keys include both website ID and visitor ID.
+
+Deleting storage or changing browser profiles can obtain another anonymous identity after CAPTCHA. This is not an unresettable per-person quota. Scripts trusted by the embedding website can access its storage, so that website's XSS protections remain important. A stopped session retains its credential and allowance. Legacy `shifter_dev` cookies are accepted only in `APP_ENV=test`.
 
 On first session creation, Redis records the visitor’s country, SID, region, expiry, byte usage, limit, revision, and stopped state. The browsing window starts immediately, including time spent idle or stopped. Its expiry is the earlier of the configured duration and the next UTC midnight.
 
@@ -392,50 +443,33 @@ Different SIDs represent independent assignment requests. They do not guarantee 
 
 ## Browser integration and isolation
 
-The trusted controls and proxied content use separate local origins. The runtime owns Scramjet, its service worker, a bare-mux SharedWorker, and the Epoxy transport. A nested frame displays the destination website.
+The embedding website supplies its UI. The runtime on a separate origin owns Scramjet, its service worker, bare-mux SharedWorker, Epoxy, and a sandboxed destination iframe. No service worker is installed on either website by the SDK. Runtime and reset documents validate the configured parent origin, actual parent window, protocol version, and per-instance channel identifier. Unknown or stale messages are ignored. `frame-ancestors` limits browser embedding to self and configured websites.
 
-The runtime attempts to clear local/session storage, service-worker registrations, caches, and IndexedDB stores on Stop, country change, and expiry. Cleanup is attempted before starting the next runtime after an interrupted session. This is a cleanup lifecycle, not a forensic erasure guarantee. Backend expiry remains effective when browser cleanup does not run.
+The integration does not require site-wide COOP/COEP headers. The pinned Scramjet version runs with synchronous XHR disabled. Destination features requiring cross-origin isolation or SharedArrayBuffer are not supported in this mode. Browser service-worker, SharedWorker, WASM, and third-party storage restrictions can still affect compatibility; the SDK reports initialization errors/timeouts. It cannot override a website's restrictive CSP. Allow the SDK script/module origin, API connect origin, runtime frame origin, and Google's reCAPTCHA script/frame/connect resources as appropriate to that website's policy. Use CSP nonces for injected scripts/styles when required.
 
-The browser integration implements HTML navigation, JavaScript network requests, forms, redirects, and cookie handling through the engine. Compatibility is site-dependent. The observed fixture login/navigation flow is not evidence that every public website, OAuth flow, payment flow, WebAuthn flow, or browser feature will work.
-
-Security-sensitive boundaries include exact Origin checks, postMessage source checks, no upstream credentials in browser code, and a separate trusted control origin. Scramjet’s emulated destination origins are not equivalent to separate browser-enforced origins for every destination; the engine and its isolation need further adversarial review before public deployment.
-
-Production proxied content must use a separate registrable domain from trusted Shifter pages. Changing only the port is a local test arrangement. Production transport-origin routing, HTTPS/WSS, and certificate management are future work.
+The runtime clears its local/session storage, service-worker registrations, caches, and IndexedDB contents on reset. Stop removes the engine frame before running reset in an independent offscreen iframe, so a website hiding its viewport cannot interrupt cleanup. Runtime/reset assets bypass the service worker’s engine configuration read, allowing reset to finish after storage is cleared. Stop waits for acknowledgement; a cleanup failure is surfaced. Cleanup is not forensic erasure. Server revocation and quotas remain effective when browser cleanup fails. Runtime cookies and emulated destination origins still need adversarial review: rewriting does not provide browser-enforced origin isolation between every proxied destination. No persistent SDK credential is stored at the runtime origin.
 
 ## API reference
 
-The session API is on the control origin. Mutation requests require its exact Origin header. The browser supplies the development cookie automatically. JSON bodies use `Content-Type: application/json`; the API body limit is 1 KiB.
+All SDK API calls use `/api/v1`. Send the embedding site's exact `Origin`; authenticated routes additionally require `Authorization: Bearer <credential>`. Browsers omit Origin on same-origin GETs: these are accepted only with same-origin Fetch Metadata and a matching configured Host. Credentialed CORS is not used. JSON requests have a 16 KiB body limit; CAPTCHA response tokens have an 8 KiB field limit.
 
-| Method and path | Body | Purpose |
+| Route | Body | Result |
 | --- | --- | --- |
-| `GET /api/countries` | None | Configured codes/names, runtime origin, development/test flags |
-| `POST /api/sessions` | `{"country":"us"}` | Create or resume the visitor’s daily session |
-| `GET /api/session` | None | Public session status and remaining allowance |
-| `POST /api/session/tickets` | None | Issue a single-use Wisp authorization valid for 30 seconds |
-| `POST /api/session/country` | `{"country":"de"}` | Revoke the current assignment and select a new country |
-| `POST /api/session/reconnect` | None | Revoke the old connection revision while preserving SID and allowance |
-| `DELETE /api/session` | None | Stop active access |
+| `GET /api/v1/config` | None | Countries, site ID, runtime origin, public CAPTCHA site key, protocol version |
+| `POST /api/v1/sessions` | `{country, captchaToken}` | `{session, credential}`; credential returned only for a new identity |
+| `GET /api/v1/session` | None | Current allowance and status |
+| `POST /api/v1/session/tickets` | None | One-use ticket, 30-second TTL, runtime origin |
+| `POST /api/v1/session/country` | `{country}` | Updated assignment; allowance retained |
+| `POST /api/v1/session/reconnect` | None | Old connection revision revoked |
+| `DELETE /api/v1/session` | None | Stopped access |
 
-A session response includes `country`, `status`, `serverTime`, `expiresAt`, `remainingBytes`, `byteLimit`, `connected`, and `developmentIdentity`. Times are Unix milliseconds. Status is `active`, `stopped`, `expired`, or `exhausted`. Upstream credentials and the upstream SID are not returned.
+Public session fields are `country`, `status`, `serverTime`, `expiresAt`, `remainingBytes`, `byteLimit`, and `connected`. Times are Unix milliseconds; upstream credentials/SID are private. Session status is `active`, `stopped`, `expired`, or `exhausted`.
 
-The Wisp endpoint is on the runtime origin:
+Error responses use `{code, error}`. Codes include `ORIGIN_DENIED`, `AUTH_REQUIRED`, `NO_SESSION`, `INVALID_INPUT`, `INVALID_COUNTRY`, `CAPTCHA_REQUIRED`, `CAPTCHA_REJECTED`, `CAPTCHA_UNAVAILABLE`, `SESSION_ENDED`, and `STORAGE_UNAVAILABLE`. Verification failures never silently mint another credential. An invalid saved credential returns 401; the SDK discards it and the visitor retries Search with a new challenge.
 
-```text
-ws://localhost:8081/wisp/?ticket=<single-use-ticket>
-ws://localhost:8081/wisp/<single-use-ticket>/
-```
+The runtime keeps `/wisp/?ticket=...` and `/wisp/<ticket>/` WebSocket routes. Only its exact Origin can redeem tickets. Forged/reused/expired tickets, unavailable sessions, ownership conflicts, regional mismatches, and Redis failures deny access. `/settings` exposes only allowed parent origins and protocol versions. `/health` and `/metrics` stay internal at the production ingress.
 
-Protocol tests use the query form; the browser transport uses the path form. Both require a valid ticket and the exact runtime Origin. Tickets are sensitive short-lived authorization values; do not add URL/access logging that records them.
-
-Additional endpoints:
-
-| Endpoint | Availability | Purpose |
-| --- | --- | --- |
-| `GET /health` | API and gateways | Redis-backed readiness check |
-| `GET /metrics` | API and gateways | JSON counters: replica, connections, streams, accepted, rejected, bytes up/down |
-| `GET /settings` | Gateways | Trusted control origin for runtime messaging |
-
-Invalid Origins or malformed ticket syntax are denied; missing/inactive sessions, reused tickets, ownership conflicts, and expired allowances are denied. Redis failures prevent authorization. HTTP error details are intentionally limited; Wisp ticket claim failures do not expose account or session internals.
+The old `/api/*` cookie endpoints are available only for isolated synthetic transport regression tests. They are absent in production and development.
 
 ## Gateway forwarding and destination policy
 
@@ -563,7 +597,22 @@ Live smoke scripts print observed IP addresses and store them in ignored artifac
 python3 tests/secret-scan.py
 ```
 
-The local scan compares exact account/password values against source, generated assets, test evidence, application/HAProxy logs, and image history without printing those values. It supplements review; it does not prove the absence of every possible secret or replace a staged-file audit.
+The local scan compares exact upstream account/password and configured local CAPTCHA secret values against source, generated assets, test evidence, application/HAProxy logs, image metadata/history, and the final image filesystem without printing those values. It supplements review; it does not prove the absence of every possible secret or replace a staged-file audit.
+
+### Shared SDK validation
+
+```sh
+npm test
+cargo test
+node scripts/build-sdk.mjs
+docker build -t shifter-web:sdk-check .
+node tests/run-sdk-tests.mjs
+HTTPS_TEST_IMAGE=shifter-web:sdk-check HTTPS_TEST_REDIS_TLS=1 node tests/https-deployment.mjs
+```
+
+The SDK runner creates a separate disposable local project on loopback ports 8180/8181, runs the origin/CAPTCHA/identity/cache checks, existing transport/quota integration tests, and Redis network-policy checks, then removes that project. It never rewrites the developer's active configuration. `--keep` retains it for browser checks and writes its cleanup context under ignored `artifacts/`.
+
+Unit tests cover modal cancellation, concurrent clicks, errors, bearer requests, stale messages, storage denial, cleanup, and Google challenge focus handling. The TLS fixture seeds a verified synthetic identity directly in its private Redis for WSS testing; it does not claim to solve a real CAPTCHA or expose a production bypass. Real credentials are never used by synthetic tests. Local browser checks exercised the branded and minimal UIs on different local site origins, mobile and desktop browsing, cancellation, and Stop/cleanup. Google’s live widget script was unavailable in that browser session; synthetic verification was used for successful session flows. Real Google challenge acceptance on the two production websites remains outstanding.
 
 ### Validation status at the initial implementation
 
@@ -622,7 +671,7 @@ The runtime listener balances independent HTTP connections as well as WebSocket 
 
 Redis uses an AOF-backed named volume and a no-eviction memory policy in the example. `stack.sh down` preserves that volume. Deleting it removes the local allowance ledger. Redis high availability, backup/restore policy, crash-durability guarantees, and production observability remain deployment work.
 
-The development cookie is not a public anti-abuse control. `APP_ENV=production` now supports the explicitly deferred identity phase; the startup log and API still identify development-cookie identity. Deleting or replacing the cookie can reset per-visitor allowances. Production transport checks do not solve that limitation.
+Production uses server-verified CAPTCHA and anonymous bearer identity. Clearing first-party storage can still reset anonymous identity; verified per-person identity and stronger abuse controls are separate work.
 
 ## Project layout
 
@@ -634,7 +683,8 @@ src/
   store.rs                    Redis session state, tickets, leases and quotas
   relay.rs                    Wisp adapter, admission, destination policy and SOCKS5
 web/
-  control/                    Trusted address bar, country selector and session UI
+  control/                    Shifter UI adapter and minimal integration example
+  sdk/                        SDK source, stable loader, immutable release assets
   runtime/                    Scramjet setup, service worker and state cleanup
 scripts/
   configure.sh                Create missing ignored local files from examples
@@ -698,7 +748,7 @@ This repository does not grant a blanket license for third-party components. Ups
 
 - Complete the pending browser acceptance procedure and investigate any remaining idle/navigation failures.
 - Validate representative public websites and supported authentication flows; define a compatibility policy.
-- Replace development cookies with verified anti-abuse identity, server-validated CAPTCHA/Fingerprint events, and abuse monitoring.
+- Provision the real v2 CAPTCHA key/secret and register both domains; verify real Google challenge acceptance on both websites. Consider stronger identity and abuse monitoring if anonymous quotas are insufficient.
 - Add broader service-level admission controls, operational resource limits, and sustained load testing.
 - Review engine isolation and escape risks for the requested original-site integration: controls at the configured Shifter origin and the runtime at `proxy.example.net` are distinct origins on the same registrable domain.
 - Provision real-domain certificates and renewal on the deployment host using the HTTPS/WSS example below; complete browser acceptance against those domains.

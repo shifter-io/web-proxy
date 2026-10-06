@@ -1,6 +1,8 @@
 // Run before loading the engine, when this document holds no Scramjet database handles.
 (async () => {
+  let bridge;
   try {
+    bridge = await createRuntimeBridge();
     localStorage.clear(); sessionStorage.clear();
     for (const registration of await navigator.serviceWorker.getRegistrations()) await registration.unregister();
     for (const key of await caches.keys()) await caches.delete(key);
@@ -21,11 +23,11 @@
       });
     }
     if (location.hash === '#stop') {
-      const config = await fetch('/settings').then(r => r.json());
-      parent.postMessage({source:'shifter-runtime',type:'cleared'},config.controlOrigin);
+      bridge.send('cleared');
       document.body.textContent = 'Browsing session cleared.';
-    } else location.replace('/index.html');
+    } else location.replace('/index.html?' + bridge.query);
   } catch {
+    bridge?.send('error',{message:'Could not clear the previous browsing session. Reload this page before retrying.'});
     document.body.textContent = 'Could not clear the previous session. Close this tab and clear this site’s storage before retrying.';
   }
 })();

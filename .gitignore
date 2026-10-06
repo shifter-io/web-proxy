@@ -1,6 +1,8 @@
 # Secrets and developer-specific environment/configuration.
 .env*
 !.env.example
+*.env
+!*.example.env
 .secrets/
 secrets/
 *.local.*
@@ -19,6 +21,12 @@ secrets/
 *.p12
 *.pfx
 *.crt
+*.bak
+*.backup
+*.old
+*~
+*.swp
+*.swo
 
 # Build products, generated browser dependencies, caches and local state.
 target/

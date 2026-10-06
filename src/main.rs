@@ -1,6 +1,9 @@
 mod api;
+mod captcha;
 mod config;
+mod public_assets;
 mod relay;
+mod sdk_api;
 mod store;
 
 use anyhow::Result;
@@ -9,7 +12,7 @@ use axum::{Router, routing::get};
 use config::Config;
 use std::sync::{Arc, atomic::AtomicU64};
 use store::Store;
-use tower_http::{services::ServeDir, set_header::SetResponseHeaderLayer};
+use tower_http::set_header::SetResponseHeaderLayer;
 
 #[derive(Default)]
 pub struct Metrics {
@@ -24,6 +27,7 @@ pub struct App {
     pub cfg: Config,
     pub store: Store,
     pub metrics: Metrics,
+    pub captcha_client: reqwest::Client,
 }
 pub type State = Arc<App>;
 
@@ -38,6 +42,10 @@ async fn main() -> Result<()> {
         cfg,
         store,
         metrics: Metrics::default(),
+        captcha_client: reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(8))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?,
     });
     let app = if state.cfg.role == "api" {
         api::router(state.clone())
@@ -48,17 +56,23 @@ async fn main() -> Result<()> {
             .route("/settings", get(api::runtime_settings))
             .route("/health", get(api::health))
             .route("/metrics", get(api::metrics))
-            .fallback_service(ServeDir::new(format!("{}/runtime", state.cfg.web_dir)))
+            .fallback_service(public_assets::router(
+                format!("{}/runtime", state.cfg.web_dir),
+                public_assets::Kind::Runtime,
+            ))
             .with_state(state.clone())
     };
     let app = app
-        .layer(SetResponseHeaderLayer::overriding(
-            HeaderName::from_static("cross-origin-opener-policy"),
-            HeaderValue::from_static("same-origin"),
-        ))
-        .layer(SetResponseHeaderLayer::overriding(
-            HeaderName::from_static("cross-origin-embedder-policy"),
-            HeaderValue::from_static("require-corp"),
+        .nest_service(
+            "/sdk",
+            public_assets::router(
+                format!("{}/sdk", state.cfg.web_dir),
+                public_assets::Kind::Sdk,
+            ),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            asset_headers,
         ))
         .layer(SetResponseHeaderLayer::overriding(
             HeaderName::from_static("cross-origin-resource-policy"),
@@ -71,15 +85,11 @@ async fn main() -> Result<()> {
         .layer(SetResponseHeaderLayer::overriding(
             HeaderName::from_static("x-content-type-options"),
             HeaderValue::from_static("nosniff"),
-        ))
-        .layer(SetResponseHeaderLayer::overriding(
-            HeaderName::from_static("cache-control"),
-            HeaderValue::from_static("no-store"),
         ));
     let listener = tokio::net::TcpListener::bind(&state.cfg.listen).await?;
-    tracing::warn!(
-        "verified identity and CAPTCHA are deferred; development-cookie identity is active"
-    );
+    if state.cfg.test_mode {
+        tracing::warn!("synthetic test mode: legacy cookie API enabled");
+    }
     tracing::info!(role=%state.cfg.role,replica=%state.cfg.replica,"ready");
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
@@ -87,4 +97,45 @@ async fn main() -> Result<()> {
         })
         .await?;
     Ok(())
+}
+
+async fn asset_headers(
+    axum::extract::State(state): axum::extract::State<State>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let path = request.uri().path().to_owned();
+    let mut response = next.run(request).await;
+    let cache = if !response.status().is_success() {
+        "no-store"
+    } else if path.starts_with("/sdk/releases/") {
+        "public, max-age=31536000, immutable"
+    } else if path.starts_with("/sdk/v1/") {
+        "public, no-cache"
+    } else {
+        "no-store"
+    };
+    response
+        .headers_mut()
+        .insert("cache-control", HeaderValue::from_static(cache));
+    if path.starts_with("/sdk/") {
+        response
+            .headers_mut()
+            .insert("access-control-allow-origin", HeaderValue::from_static("*"));
+    }
+    let ancestors = format!(
+        "frame-ancestors 'self' {}",
+        state
+            .cfg
+            .integrations
+            .iter()
+            .map(|i| i.origin.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    response.headers_mut().insert(
+        "content-security-policy",
+        HeaderValue::from_str(&ancestors).unwrap(),
+    );
+    response
 }

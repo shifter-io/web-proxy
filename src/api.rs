@@ -77,22 +77,31 @@ pub fn router(state: State) -> Router {
         .allow_credentials(true)
         .allow_methods([Method::GET, Method::POST, Method::DELETE])
         .allow_headers([CONTENT_TYPE]);
-    Router::new()
+    let base = Router::new()
         .route("/health", get(health))
         .route("/metrics", get(metrics))
-        .route("/api/countries", get(countries))
-        .route("/api/sessions", post(start))
-        .route("/api/session", get(current).delete(stop))
-        .route("/api/session/tickets", post(ticket))
-        .route("/api/session/reconnect", post(reconnect))
-        .route("/api/session/country", post(change))
-        .layer(DefaultBodyLimit::max(1024))
-        .layer(cors)
-        .fallback_service(tower_http::services::ServeDir::new(format!(
-            "{}/control",
-            state.cfg.web_dir
-        )))
-        .with_state(state)
+        .merge(crate::sdk_api::router(&state));
+    // Cookie authorization is available only to isolated synthetic tests.
+    let base = if state.cfg.test_mode {
+        base.merge(
+            Router::new()
+                .route("/api/countries", get(countries))
+                .route("/api/sessions", post(start))
+                .route("/api/session", get(current).delete(stop))
+                .route("/api/session/tickets", post(ticket))
+                .route("/api/session/reconnect", post(reconnect))
+                .route("/api/session/country", post(change))
+                .layer(DefaultBodyLimit::max(1024))
+                .layer(cors),
+        )
+    } else {
+        base
+    };
+    base.fallback_service(crate::public_assets::router(
+        format!("{}/control", state.cfg.web_dir),
+        crate::public_assets::Kind::Control,
+    ))
+    .with_state(state)
 }
 pub async fn health(AxumState(state): AxumState<State>) -> Response {
     let result: redis::RedisResult<String> = redis::cmd("PING")
@@ -109,7 +118,9 @@ pub async fn health(AxumState(state): AxumState<State>) -> Response {
     }
 }
 pub async fn runtime_settings(AxumState(s): AxumState<State>) -> Json<Value> {
-    Json(json!({"controlOrigin":s.cfg.control_origin}))
+    Json(
+        json!({"allowedOrigins":s.cfg.integrations.iter().map(|i| &i.origin).collect::<Vec<_>>(), "protocolVersions":[1]}),
+    )
 }
 pub async fn metrics(AxumState(s): AxumState<State>) -> Json<Value> {
     let m = &s.metrics;
