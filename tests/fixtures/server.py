@@ -18,7 +18,7 @@ async def handle(reader, writer):
         username = (await reader.readexactly(n)).decode()
         n = (await reader.readexactly(1))[0]
         password = await reader.readexactly(n)
-        match = re.fullmatch(r'customer-fixture-country-([a-z]{2})-strict-true-sid-([a-f0-9]{32})-ttl-600-pool-shifter', username)
+        match = re.fullmatch(r'customer-fixture-country-([a-z]{2})-strict-true-sid-([a-f0-9]{32})-ttl-1800-pool-shifter', username)
         if not match or password != b'fixture-password':
             writer.write(b'\x01\x01'); await writer.drain(); return
         country, sid = match.groups()

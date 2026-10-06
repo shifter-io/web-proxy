@@ -23,9 +23,39 @@
           frame = scramjet.createFrame();
           frame.frame.setAttribute('sandbox','allow-scripts allow-same-origin allow-forms allow-downloads');
           frame.frame.title = 'Destination website';
-          frame.addEventListener('urlchange', event => send('url',{url:String(event.url)}));
-          document.getElementById('loading')?.remove(); document.body.appendChild(frame.frame);
+          const currentFrame = frame;
+          const isCurrent = () => frame === currentFrame;
+          currentFrame.addEventListener('urlchange', event => {
+            if (isCurrent()) send('url',{url:String(event.url)});
+          });
+          currentFrame.addEventListener('navigate', event => {
+            // Anchor changes do not load a document, and must not leave an overlay.
+            let sameDocument = false;
+            try {
+              const current = new URL(currentFrame.url);
+              const next = new URL(event.url, current);
+              sameDocument = current.href !== next.href && current.origin === next.origin && current.pathname === next.pathname && current.search === next.search;
+            } catch {}
+            queueMicrotask(() => {
+              if (isCurrent() && !event.defaultPrevented && !sameDocument) send('loading');
+            });
+          });
+          currentFrame.frame.addEventListener('load', () => {
+            if (!isCurrent()) return;
+            const destinationWindow = currentFrame.frame.contentWindow;
+            try { if (destinationWindow.location.href === 'about:blank') return; } catch {}
+            send('loaded');
+            // Covers links, forms and history traversal that bypass frame.go().
+            destinationWindow.addEventListener('pagehide', () => {
+              if (isCurrent()) send('loading');
+            }, {once:true});
+            destinationWindow.addEventListener('pageshow', event => {
+              if (isCurrent() && event.persisted) send('loaded');
+            });
+          });
+          document.getElementById('loading')?.remove();
           frame.go(url);
+          document.body.appendChild(frame.frame);
         } else if (frame && command === 'go') frame.go(url);
         else if (frame && ['back','forward','reload'].includes(command)) frame[command]();
       } catch (error) { console.error('Runtime start failed:','Transport initialization error'); send('error',{message:'The connection could not be established. Stop browsing and try again; your remaining allowance is preserved.'}); }

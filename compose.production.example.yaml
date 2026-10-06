@@ -1,0 +1,90 @@
+# Standalone deployment: do NOT merge with the local HTTP/unauthenticated Redis stack.
+# The existing Redis network must be internal, isolated, and limited to Redis/API/gateways.
+name: shifter-web-production
+x-app: &app
+  build: .
+  image: shifter-web:production
+  networks: [ingress, session_state, egress]
+  init: true
+  restart: unless-stopped
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  ulimits:
+    nofile: {soft: 65536, hard: 65536}
+  volumes:
+    - ${REDIS_TLS_DIR:-./.secrets/redis-tls}:/run/redis-tls:ro
+  healthcheck:
+    test: [CMD, curl, -fsS, http://localhost:3000/health]
+    interval: 5s
+    timeout: 3s
+    retries: 12
+x-env: &env
+  APP_ENV: production
+  SHIFTER_REGION: ${SHIFTER_REGION:-blr}
+  REDIS_URL_FILE: /run/secrets/redis_url
+  # Empty for private plaintext Redis in this phase. Optional private CA for rediss://.
+  REDIS_CA_FILE: ${REDIS_CA_FILE:-}
+  CONTROL_ORIGIN: ${CONTROL_ORIGIN:-https://example.com}
+  RUNTIME_ORIGIN: https://${RUNTIME_HOST:-proxy.example.net}
+  SESSION_SECONDS: ${SESSION_SECONDS:-1800}
+  BYTE_LIMIT: ${BYTE_LIMIT:-104857600}
+  MAX_STREAMS: ${MAX_STREAMS:-32}
+  STREAM_RATE: ${STREAM_RATE:-8}
+  STREAM_BURST: ${STREAM_BURST:-16}
+  CONNECT_TIMEOUT_SECONDS: ${CONNECT_TIMEOUT_SECONDS:-15}
+  IDLE_TIMEOUT_SECONDS: ${IDLE_TIMEOUT_SECONDS:-60}
+services:
+  haproxy:
+    image: haproxy:3.2-alpine@sha256:5d97434a423c2533cfeb42874d45cf6d69a840b60334582dfbfd5008e94c80be
+    networks: [edge, ingress]
+    ports: ["${PUBLIC_BIND_IP:-0.0.0.0}:80:8080", "${PUBLIC_BIND_IP:-0.0.0.0}:443:8443"]
+    environment:
+      RUNTIME_HOST: ${RUNTIME_HOST:-proxy.example.net}
+    volumes:
+      - ./deploy/haproxy.production.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ${TLS_CERT_DIR:?Set TLS_CERT_DIR to a directory of fullchain-plus-key PEM files}:/run/tls:ro
+    depends_on:
+      api: {condition: service_healthy}
+      gateway-a: {condition: service_healthy}
+      gateway-b: {condition: service_healthy}
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+  api:
+    <<: *app
+    networks: [ingress, session_state]
+    environment:
+      <<: *env
+      ROLE: api
+      REPLICA: api
+    secrets: [redis_url]
+  gateway-a:
+    <<: *app
+    environment:
+      <<: *env
+      ROLE: gateway
+      REPLICA: gateway-a
+    secrets: [redis_url, shifter_credentials]
+  gateway-b:
+    <<: *app
+    environment:
+      <<: *env
+      ROLE: gateway
+      REPLICA: gateway-b
+    secrets: [redis_url, shifter_credentials]
+secrets:
+  redis_url:
+    file: ${REDIS_URL_SECRET_FILE:?Set REDIS_URL_SECRET_FILE}
+  shifter_credentials:
+    file: ${SHIFTER_CREDENTIALS_FILE:?Set SHIFTER_CREDENTIALS_FILE}
+networks:
+  edge: {}
+  egress: {}
+  ingress:
+    internal: true
+  session_state:
+    external: true
+    name: ${REDIS_NETWORK:?Set REDIS_NETWORK to the existing isolated Redis network}

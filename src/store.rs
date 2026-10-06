@@ -41,14 +41,28 @@ impl Session {
     }
 }
 impl Store {
-    pub async fn new(url: &str) -> Result<Self> {
-        let client = redis::Client::open(url)?;
+    pub async fn new(url: &str, ca_file: Option<&str>) -> Result<Self> {
+        let client = if let Some(path) = ca_file {
+            let root_cert =
+                std::fs::read(path).map_err(|_| anyhow::anyhow!("cannot read REDIS_CA_FILE"))?;
+            redis::Client::build_with_tls(
+                url,
+                redis::TlsCertificates {
+                    client_tls: None,
+                    root_cert: Some(root_cert),
+                },
+            )
+        } else {
+            redis::Client::open(url)
+        }
+        .map_err(|_| anyhow::anyhow!("invalid Redis connection/TLS configuration"))?;
         let options = redis::aio::ConnectionManagerConfig::new()
             .set_connection_timeout(std::time::Duration::from_secs(2))
             .set_response_timeout(std::time::Duration::from_secs(2))
             .set_number_of_retries(1);
         Ok(Self {
-            db: client.get_connection_manager_with_config(options).await?,
+            db: client.get_connection_manager_with_config(options).await
+                .map_err(|_| anyhow::anyhow!("Redis connection failed; check private reachability, ACL credentials and TLS trust"))?,
         })
     }
     pub fn key(visitor: &str) -> String {

@@ -1,10 +1,10 @@
 # Shifter Web Proxy
 
-A web proxy that combines **Scramjet in the browser**, **HAProxy in TCP mode**, **Rust Wisp gateways**, **Redis session enforcement**, and **Shifter residential proxies**.
+A web proxy that combines **Scramjet in the browser**, **HAProxy (local TCP or HTTPS/WSS termination)**, **Rust Wisp gateways**, **Redis session enforcement**, and **Shifter residential proxies**.
 
 Visitors enter a website, choose an exit country, and browse inside the page without configuring their browser’s proxy settings. Each visitor receives a server-generated sticky session ID. The gateway adds the upstream credentials and country targeting on the server.
 
-**Status: local deployment. Backend validation passed; final browser acceptance is incomplete.** Earlier browser runs experienced Wisp disconnections after navigation or idle. A WebSocket keepalive was added, but its final browser regression and the complete cookie-cleanup sequence remain unverified. This is not a production-ready public proxy.
+**Status: HTTPS/WSS deployment support implemented; verified identity/CAPTCHA deferred for the current production phase. Backend validation passed; final browser acceptance is incomplete.** Earlier browser runs experienced Wisp disconnections after navigation or idle. A WebSocket keepalive was added, but its final browser regression and the complete cookie-cleanup sequence remain unverified. HTTPS transport does not provide abuse protection; the development-cookie identity remains active.
 
 An offline HTML version of this README is included at [docs/readme.html](docs/readme.html).
 
@@ -16,6 +16,7 @@ An offline HTML version of this README is included at [docs/readme.html](docs/re
 - [Requirements](#requirements)
 - [Quick start with synthetic traffic](#quick-start-with-synthetic-traffic)
 - [Using a real Shifter account](#using-a-real-shifter-account)
+- [HTTPS/WSS deployment](#httpswss-deployment)
 - [Configuration reference](#configuration-reference)
 - [Redis security rules](#redis-security-rules)
 - [Session lifecycle and limits](#session-lifecycle-and-limits)
@@ -41,7 +42,23 @@ An offline HTML version of this README is included at [docs/readme.html](docs/re
 - Explicit, bounded live smoke tests for country targeting, sampled sticky IP behavior, and TLS forwarding.
 - Example configuration files and a bootstrap script that creates ignored local copies.
 
-The VPN call-to-action is informational. A real app download URL, live CAPTCHA verification, and verified Fingerprint identity are not configured.
+Live CAPTCHA verification and verified Fingerprint identity are not configured. The CAPTCHA shown on the landing page is explicitly a design preview.
+
+## Web proxy page example
+
+The control page now follows the Astro Shifter website’s design: its SVG logo, Geist typography, blue accent, dark surfaces, and Products / Solutions / Pricing / Resources navigation. The three-step section ports the existing `SectionHeader` and `ProductFeaturesSection` styles and scroll-reveal timings, including the gradient heading, icon tiles, card hover effects, and staggered reveal; only its copy and icons change. The reference is `Microleaves/landing` at commit `b8f44c52`; the Astro website itself has not been modified.
+
+Open **http://localhost:8080** to review the landing page, search widget, explanatory content, and FAQs. Choose a country, enter a website, and press **Search**. The CAPTCHA preview modal opens directly, including on a first visit. Selecting its checkbox closes the modal and starts browsing automatically, without an extra Continue button. The top-right X or Escape returns without starting a session, and each new landing-page Search resets the check. There is no separate welcome dialog or additional confirmation step.
+
+Starting a session expands the page into a viewport-filling browser. A centered Shifter logo and animated Loading dots cover the destination during startup, navigation, reloads, and location changes. The overlay clears when the destination iframe loads, on errors or expiry, or after a 25-second timeout. Reduced-motion preferences keep the logo and dots static. Its toolbar provides Back, Forward, Reload, country selection, a URL field, remaining allowance, and End session. The **Shifter logo** returns to the landing page while the session continues; **Return to your browsing session** reopens it. The branded toolbar stays on one row. On small screens the Shifter icon remains visible and a compact menu contains Back, Forward, Reload, remaining allowance, and End session. The destination fills the remaining dynamic viewport, with scrolling inside the destination.
+
+Below the search bar, all eligible countries appear in three looping rows of circular flags and names, moving right, left, and right. Hover stops motion; reduced-motion preferences provide static, horizontally scrollable rows. Repeated visual copies are hidden from assistive technology. The following brand section pairs Shifter copy with its icon surrounded by the top 12 eligible countries on three circular orbits. The rings alternate clockwise/counterclockwise/clockwise, while the flags stay upright. Hover pauses the rings, and reduced-motion preferences disable their animation.
+
+The CAPTCHA checkbox in the modal is an interaction preview, not abuse protection or server verification. Verified identity/CAPTCHA is deferred for the current production phase; the checkbox does not grant server-verified identity. The local example uses `noindex,nofollow`; remove that only when an approved public route and production controls exist. SEO copy is static HTML below the hero. The menu uses the source site’s destinations; the eventual Astro integration should reuse its actual navigation and footer components.
+
+Brand assets are served locally from `web/control/assets/`. The SVG comes from the pulled Astro component; the self-hosted Geist Latin font is the website’s deployed font asset. No external font or UI CDN is needed.
+
+The redesigned UI was checked in the integrated browser at desktop and mobile widths: CAPTCHA preview gating, cancel/reopen, viewport expansion, live destination rendering, return/resume, and ending a session. A live connection interruption recovered with Reload. A country-change run also exposed an intermittent runtime initialization failure; the UI now offers Reload during initialization and reports a timeout instead of leaving an unrecoverable blank view. These checks do not resolve the broader browser-runtime acceptance limitations listed above.
 
 ## Architecture
 
@@ -84,6 +101,9 @@ Redis is shared across the API and gateway replicas. No process-global proxy URL
 | --- | --- | --- |
 | `compose.example.yaml` | `compose.yaml` | Local development topology |
 | `compose.test.example.yaml` | `compose.test.yaml` | Synthetic upstream and isolated test database |
+| `compose.production.example.yaml` | `compose.production.yaml` | HTTPS ingress and applications connected to existing private Redis |
+| `deploy/haproxy.production.example.cfg` | `deploy/haproxy.production.cfg` | TLS certificates, HTTPS routing, redirects and WSS |
+| `deploy/production.example.env` | `.env.production` | Hostnames and private certificate/secret paths |
 | `deploy/haproxy.example.cfg` | `deploy/haproxy.cfg` | TCP listeners, balancing, DNS resolution, health checks |
 | `.env.example` | `.env` | Non-secret mock defaults; local credential-file path for live mode |
 | `tests/fixtures/credentials.example.toml` | `tests/fixtures/credentials.toml` | Public synthetic values accepted only by the mock fixture |
@@ -121,7 +141,7 @@ sh scripts/configure.sh
 sh scripts/stack.sh mock
 ```
 
-Open **http://localhost:8080**. Enter **http://fixture.test/**, select a country, and choose **Browse**.
+Open **http://localhost:8080**. Enter **http://fixture.test/**, select a country, and choose **Search**.
 
 The fixture displays the configured exit country and a synthetic assignment marker. It provides a JavaScript fetch, navigation links, redirects, a synthetic username form, and a second virtual origin for cookie-isolation checks. Use only synthetic identities with the fixture.
 
@@ -170,7 +190,7 @@ Edit the ignored `.env` file:
 ```dotenv
 SHIFTER_CREDENTIALS_FILE=./.secrets/shifter.toml
 SHIFTER_REGION=blr
-SESSION_SECONDS=600
+SESSION_SECONDS=1800
 BYTE_LIMIT=104857600
 ```
 
@@ -186,6 +206,69 @@ The default regional hostname is `blr.p.shifter.io:443`. The selected exit count
 
 Switching between mock and live recreates the application containers and interrupts current requests. The profiles use separate Redis databases: mock uses DB 1; live development uses DB 0. The live command removes the orphaned mock fixture container.
 
+## HTTPS/WSS deployment
+
+Use `compose.production.example.yaml` as a **standalone** stack. Do not merge it with `compose.example.yaml`, which supplies local HTTP and unauthenticated Redis. The production example uses your existing Redis and does not create, publish, or modify it.
+
+```sh
+sh scripts/configure.sh
+mkdir -p .secrets/https .secrets/redis-tls
+```
+
+Edit the ignored `.env.production` generated from `deploy/production.example.env`:
+
+- `RUNTIME_HOST=proxy.example.net` is the public gateway hostname. Point its DNS record at the ingress host. Only HAProxy publishes ports 80 and 443. The API and gateway listeners stay on the internal ingress network; gateways have a separate outbound network for Shifter.
+- `CONTROL_ORIGIN=https://example.com` is the exact original-site origin allowed to call the API and exchange messages with the runtime. Change it to the actual integration origin if needed (for example, a `www` host). It is an allowlist setting, not a hostname hosted by this stack. No separate control-page certificate or deployment is required; `web/control` remains the local integration example.
+- Set `TLS_CERT_DIR` to a directory containing one or more `.pem` files, each with the full certificate chain followed by its private key. The certificate must cover `proxy.example.net` (or the configured `RUNTIME_HOST`). Provision certificates through your existing certificate manager or ACME DNS challenge workflow. The example does not issue or renew certificates automatically. Mount only the needed server PEM files, not an entire CA/ACME account directory.
+- Set `REDIS_NETWORK` to the existing Redis Docker network. It must be an internal bridge with IPv4/IPv6 gateway mode `isolated`, no Redis published ports, and only Redis/API/gateways as members. HAProxy never joins it. For Redis on separate private infrastructure, adapt the application state-network attachment and firewall policy to that deployment; the supplied Compose topology assumes a shared Docker network.
+- Set `REDIS_URL_SECRET_FILE` to an ignored file containing `redis://USER:URL_ENCODED_PASSWORD@PRIVATE_REDIS_HOST:6379/0` for the current private-network/password deployment. The hostname must resolve only to private addresses. Use a dedicated named ACL user, with unauthenticated default access disabled. No Redis TLS is required for this explicitly requested phase. Optional `rediss://` is also supported, with certificate and hostname verification.
+- Leave `REDIS_CA_FILE` empty for the current plaintext private Redis deployment. If choosing optional Redis TLS later, use `rediss://`; for a private CA place its PEM bundle at `.secrets/redis-tls/ca.crt` and set `REDIS_CA_FILE=/run/redis-tls/ca.crt`. For a system-trusted CA, leave this variable empty. TLS certificate and hostname verification cannot be disabled. Mutual TLS client certificates are not configured by this example.
+- Set `SHIFTER_CREDENTIALS_FILE` to the existing account TOML. Ensure application secret files and the CA are readable by container UID 10001, while restricting host access. HAProxy must be able to read its private keys. Never bake these files into images.
+
+The least-privilege Redis ACL tested for application traffic permits `~daily:* ~ticket:*` keys and commands `+ping +hello +select +client|setinfo +evalsha +script|load +exists +hset +pexpireat +hget +hincrby +hgetall +hdel +setex +getdel`. Apply this to a dedicated application user through your existing Redis administration process; do not replace operational or replication ACLs with this list.
+
+Validate configuration, build, and launch **on the intended deployment host**:
+
+```sh
+docker compose --env-file .env.production -f compose.production.yaml config --quiet
+docker compose --env-file .env.production -f compose.production.yaml run --rm --no-deps haproxy haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
+docker compose --env-file .env.production -f compose.production.yaml up -d --build --wait
+```
+
+HAProxy rejects unknown hostnames, redirects HTTP to the gateway HTTPS hostname, and terminates TLS 1.2 or later. On `proxy.example.net`, `/api/*` routes to the session API; `/wisp/*` and runtime assets route to the gateways. The control-page example is not published by this production ingress. WebSockets use HTTP/1.1 with an eleven-minute idle tunnel timeout. The browser automatically chooses WSS. HTTPS session cookies include `Secure`, `HttpOnly`, and `SameSite=Strict`. HSTS is set on backend responses. Public `/health` and `/metrics` requests are denied; backend health checks remain internal. Access logs are disabled to avoid storing Wisp tickets.
+
+Certificate renewal: have your certificate manager atomically replace the fullchain-plus-key `.pem` files in the mounted directory, validate with the same HAProxy command, then recreate HAProxy to load them:
+
+```sh
+docker compose --env-file .env.production -f compose.production.yaml up -d --no-deps --force-recreate haproxy
+```
+
+Recreating HAProxy interrupts active Wisp connections. Schedule renewal deployment accordingly. The application still uses development-cookie identity in this phase and emits an explicit startup warning; CAPTCHA verification is not implemented.
+
+For integration into the original Shifter site, configure the example before loading `app.js`:
+
+```html
+<script>window.SHIFTER_API_ORIGIN = "https://proxy.example.net";</script>
+<script type="module" src="/path-to-integrated-example/app.js"></script>
+```
+
+The example sends credentialed API requests to that origin and learns the runtime origin from `/api/countries`. The API permits credentialed CORS only for `CONTROL_ORIGIN`, including JSON preflight requests; mutating endpoints still validate that exact Origin. The runtime accepts parent messages only from the same configured control origin. Without `SHIFTER_API_ORIGIN`, the example continues using local same-origin `/api` routes.
+
+The current cookie uses `SameSite=Strict`, which supports the intended HTTPS `example.com` → `proxy.example.net` integration because they share a site. Hosting the controls on a different registrable domain would need a separate cookie/integration design. Preserve the example's browser runtime requirements (including cross-origin isolation headers and iframe permissions) when moving it into the original site. Browser acceptance on the final integrated site remains outstanding.
+
+Run the local integration test without contacting production or opening destination streams through Shifter:
+
+```sh
+docker build -t shifter-web:https-check .
+node tests/https-deployment.mjs
+node --test tests/redis-network-policy.test.mjs
+cargo test --locked
+```
+
+The test uses disposable certificates and ACL secrets, the real production HAProxy configuration and application mode, and a private isolated Redis network with ACL/password authentication. Run again with `HTTPS_TEST_REDIS_TLS=1 node tests/https-deployment.mjs` to check the optional encrypted Redis path. It checks redirects, certificate trust, secure cookies, credentialed CORS and rejection of foreign Origins, authenticated WSS, ticket reuse rejection, invalid Redis passwords/hostnames/CAs, unauthenticated Redis rejection, application connectivity, HAProxy isolation, and failure when quota storage stops. Only loopback ingress ports are published; Redis has none. Test containers and fixture credentials are removed afterward. Passing these checks does not establish browser compatibility or validate an existing production Redis server.
+
+Configuration references: [HAProxy WebSocket support](https://www.haproxy.com/documentation/haproxy-configuration-tutorials/protocol-support/websocket/) and [Redis Rust 0.32.7 TLS features](https://docs.rs/crate/redis/0.32.7).
+
 ## Configuration reference
 
 The example Compose environment supplies the following defaults. Customize the ignored `.env` and local Compose files as needed.
@@ -194,7 +277,7 @@ The example Compose environment supplies the following defaults. Customize the i
 | --- | --- | --- |
 | `SHIFTER_CREDENTIALS_FILE` | Mock fixture path in the example | Host-side path mounted as the live gateway secret |
 | `SHIFTER_REGION` | `blr` | Explicit Shifter ingress region |
-| `SESSION_SECONDS` | `600` | Daily browsing window, maximum 600 seconds |
+| `SESSION_SECONDS` | `1800` | Daily browsing window, maximum 1800 seconds (30 minutes) |
 | `BYTE_LIMIT` | `104857600` | 100 MiB combined destination payload per UTC day |
 | `MAX_STREAMS` | `32` | Concurrent destination streams per Wisp connection; configuration maximum 128 |
 | `STREAM_RATE` | `8` | New destination streams per second |
@@ -208,17 +291,30 @@ These advanced settings are set in the local Compose environment or supplied whe
 
 | Variable | Example/default | Meaning |
 | --- | --- | --- |
-| `APP_ENV` | `development` or `test` | Development uses real Shifter; test uses the synthetic upstream. Other values, including `production`, are rejected. |
+| `APP_ENV` | `development`, `test`, or `production` | Production requires distinct HTTPS origins and private Redis with a named ACL user/password; optional Redis TLS is certificate-verified. Identity remains the development cookie. |
 | `ROLE` | `api` or `gateway` | Binary role |
 | `REPLICA` | `api`, `gateway-a`, `gateway-b` | Operational identity for health/metrics |
 | `LISTEN` | `0.0.0.0:3000` | Listener inside the container |
-| `REDIS_URL` | `redis://redis:6379/` | Shared session store; mock override selects `/1` |
+| `REDIS_URL` | `redis://redis:6379/` | Local shared session store; production allows private `redis://` with named ACL credentials, or optional verified `rediss://` |
+| `REDIS_URL_FILE` | `/run/secrets/redis_url` in production | Read the connection URL from a secret file; takes precedence over `REDIS_URL` |
+| `REDIS_CA_FILE` | Empty (system trust) | Optional PEM CA bundle for private Redis TLS; hostname verification always remains enabled |
 | `CONTROL_ORIGIN` | `http://localhost:8080` | Exact trusted browser origin |
 | `RUNTIME_ORIGIN` | `http://localhost:8081` | Exact runtime/WebSocket origin |
 | `CREDENTIALS_FILE` | `/run/secrets/shifter_credentials` | In-container credential path |
 | `WEB_DIR` | `/app/web` in Docker | Static asset root |
 
-Supported country codes are `us`, `gb`, `de`, `fr`, `ca`, `au`, `sg`, and `in`. The interface defaults to the United States. Missing or unlisted countries are rejected; country targeting is never silently omitted.
+Country availability is generated from the [Shifter session-manager weights](https://github.com/leftclick-io/session-manager/blob/master/config/weights.json). Sum only `shifter` leaf counts within each country in `locations`; include countries with a total **strictly greater than 250**. The current snapshot yields **54 countries**. This is a weights-based snapshot, not a live availability check. Both the country API and gateway validation use the same generated allowlist. Missing or unlisted countries are rejected; country targeting is never silently omitted.
+
+The searchable country picker groups eligible locations into Tier 1, Tier 2, and Tier 3, with the US, UK, Canada, Germany, Italy, and France first. These are configurable product display priorities in `web/control/country-order.js`, independent of the IP-count eligibility filter. Filtering search results preserves that order, and future weights refreshes cannot replace it with alphabetical order. Countries not explicitly prioritized fall into Tier 3 alphabetically. The picker defaults to the United States and uses the Astro site’s existing circular SVG flags and country names. Flags appear in the selected value and every menu option, in both the landing page and browser toolbar. Keyboard users can search, move with arrow keys, select with Enter, and dismiss with Escape.
+
+To refresh, obtain the latest weights JSON through authenticated GitHub access into an ignored location or outside the repository, then run:
+
+```sh
+node scripts/sync-countries.mjs /path/to/weights.json /path/to/Shifter-Astro
+node --test tests/countries.test.mjs
+```
+
+The importer updates `src/config.rs` and copies eligible flags from the Astro checkout. It does not copy provider weights, counts, or operational metadata into this repository. Rebuild the API and gateways together after refreshing the list. The boundary test excludes a country at exactly 250 and ensures other providers cannot make a country eligible.
 
 The regional allowlist is `fra`, `ams`, `lon`, `nyc`, `tor`, `sgp`, `blr`, and `syd`. Only the BLR upstream was exercised in the initial live validation.
 
@@ -234,16 +330,16 @@ The explicit bridge mode is required: on the development device, `internal: true
 
 For an existing checkout, `scripts/configure.sh` preserves local files. Merge the network changes from `compose.example.yaml` into your ignored `compose.yaml`, then recreate this project’s containers and networks with `docker compose down` followed by your usual stack start command. Do not pass `--volumes`: the Redis data volume must survive. This interrupts active local browsing connections.
 
-Production requirements:
+Production requirements (the current phase explicitly overrides the baseline Redis TLS requirement with private-network ACL/password authentication):
 
 - Private IPs and private DNS only; no public IP, public load balancer, public DNS endpoint, NAT/port forwarding, or host-network shortcut for Redis.
 - Bind Redis only to private interfaces and necessary loopback addresses. Firewall/security groups deny access by default, allowing the regional API/gateways and explicitly approved private administration, monitoring, and replication peers.
 - Require named ACL users with least-privilege key and command permissions; disable unauthenticated default access. Keep protected mode enabled.
-- Require TLS with certificate and hostname verification for client and replication connections. Authentication complements private networking; it does not replace it.
+- The project baseline calls for verified TLS for client and replication connections. For this deployment phase, the user explicitly selected private-network ACL/password authentication without Redis TLS. The application supports that mode; private networking and authorization remain mandatory. Optional TLS always verifies certificates and hostnames.
 - Keep credentials, ACL material, certificates, private keys, and actual regional configuration in secret storage or ignored local files. Do not log authenticated Redis URLs.
 - Continue failing closed when authorization or quota storage is unavailable.
 
-The local configuration uses unauthenticated, non-TLS Redis **only inside its isolated Docker state network**. Production remains disabled. The current Rust Redis dependency/configuration is not a ready-made production TLS/ACL integration; implement and validate it before production is enabled. Network isolation alone must not be described as complete production hardening.
+The local configuration uses unauthenticated Redis **only inside its isolated Docker state network in development/test mode**. Production requires a named ACL user and password on private Redis; plaintext TCP is supported for this phase. Optional Redis TLS supports a private CA bundle. Startup rejects insecure TLS verification, default/missing ACL users, and Redis DNS resolving outside RFC1918/ULA space. Network isolation alone must not be described as complete production hardening.
 
 Run the policy rejection checks and the deployed-container checks after networking changes:
 
@@ -260,7 +356,7 @@ These requirements follow the [Redis security guidance](https://redis.io/docs/la
 
 ### Identity and daily allowance
 
-The local visitor identity is an opaque first-party cookie named `shifter_dev`, with HttpOnly and SameSite=Strict attributes. This is a development identity, not verified anti-abuse identity. Deleting/replacing cookies can create another visitor; the current service must not be exposed as a public free proxy.
+The local visitor identity is an opaque first-party cookie named `shifter_dev`, with HttpOnly and SameSite=Strict attributes. This is a development identity, not verified anti-abuse identity. Deleting/replacing cookies can create another visitor; verified identity and abuse protection remain deferred for the current production phase.
 
 On first session creation, Redis records the visitor’s country, SID, region, expiry, byte usage, limit, revision, and stopped state. The browsing window starts immediately, including time spent idle or stopped. Its expiry is the earlier of the configured duration and the next UTC midnight.
 
@@ -358,7 +454,7 @@ For each destination stream, the gateway:
 The username format is:
 
 ```text
-customer-<account>-country-<country>-strict-true-sid-<128-bit-random-hex>-ttl-600-pool-shifter
+customer-<account>-country-<country>-strict-true-sid-<128-bit-random-hex>-ttl-1800-pool-shifter
 ```
 
 The final `pool-shifter` flag restricts upstream assignments to the Shifter pool. The gateway always adds it server-side; visitors cannot choose or override the pool.
@@ -373,7 +469,7 @@ The reserved `fixture.test` and `second.test` mappings exist only in test mode. 
 
 ## HAProxy, regions, and recovery
 
-HAProxy runs in TCP mode with `leastconn`, backend health checks, Docker DNS resolution, and an eleven-minute connection idle timeout. A gateway sends periodic WebSocket pings. Backend allowance enforcement still ends browsing at its own shorter session deadline.
+Local HAProxy runs in TCP mode; the production example terminates HTTPS in HTTP mode. Both use `leastconn`, backend health checks, Docker DNS resolution, and an eleven-minute connection/tunnel idle timeout. A gateway sends periodic WebSocket pings. Backend allowance enforcement still ends browsing at its own shorter session deadline.
 
 **HAProxy balances connections, not individual requests inside a Wisp connection.** An established WebSocket remains attached to one replica. Independent visitors and later reconnects may select different replicas.
 
@@ -526,7 +622,7 @@ The runtime listener balances independent HTTP connections as well as WebSocket 
 
 Redis uses an AOF-backed named volume and a no-eviction memory policy in the example. `stack.sh down` preserves that volume. Deleting it removes the local allowance ledger. Redis high availability, backup/restore policy, crash-durability guarantees, and production observability remain deployment work.
 
-The development cookie is not a public anti-abuse control. `APP_ENV=production` is deliberately rejected instead of silently using that identity mode.
+The development cookie is not a public anti-abuse control. `APP_ENV=production` now supports the explicitly deferred identity phase; the startup log and API still identify development-cookie identity. Deleting or replacing the cookie can reset per-visitor allowances. Production transport checks do not solve that limitation.
 
 ## Project layout
 
@@ -604,14 +700,14 @@ This repository does not grant a blanket license for third-party components. Ups
 - Validate representative public websites and supported authentication flows; define a compatibility policy.
 - Replace development cookies with verified anti-abuse identity, server-validated CAPTCHA/Fingerprint events, and abuse monitoring.
 - Add broader service-level admission controls, operational resource limits, and sustained load testing.
-- Separate trusted Shifter pages and untrusted website content onto different registrable domains; review engine isolation and escape risks.
-- Configure production HTTPS/WSS, transport-origin routing, certificate handling, and secure cookie policy.
-- Enforce the Redis security rules above, including production ACL/TLS support, private endpoints and verified network access restrictions.
+- Review engine isolation and escape risks for the requested original-site integration: controls at the configured Shifter origin and the runtime at `proxy.example.net` are distinct origins on the same registrable domain.
+- Provision real-domain certificates and renewal on the deployment host using the HTTPS/WSS example below; complete browser acceptance against those domains.
+- Verify the existing production Redis deployment against the rules above: private endpoints, named ACL users, and network access restrictions; verify certificates if optional Redis TLS is enabled. Client ACL/TLS support is implemented and covered by local integration checks.
 - Establish regional Redis/state availability and an explicit cross-region recovery protocol that preserves allowance but rotates residential assignment.
 - Deploy regional HAProxy/gateway groups and geographic/latency-aware DNS, with health-aware routing.
 - Add production telemetry that protects browsing privacy and excludes credentials, connection tickets, and destination URLs.
 - Configure a real VPN download destination and final expired-session UX.
 
-No production DNS changes, public deployment, or remote-device execution are part of this repository’s initial local milestone.
+The HTTPS implementation and tests run locally. Production DNS changes, certificate issuance, and execution on a deployment host are separate operational steps; no remote deployment was performed.
 
 References: [Scramjet](https://github.com/MercuryWorkshop/scramjet), [epoxy-tls and Wisp](https://github.com/MercuryWorkshop/epoxy-tls), [HAProxy TCP configuration](https://www.haproxy.com/documentation/haproxy-configuration-tutorials/protocol-support/tcp/), [Shifter gateway and regions](https://shifter.io/docs/products/residential-proxies/gateway-and-auth/), [Shifter geo-targeting](https://shifter.io/docs/products/residential-proxies/geo-targeting/), and [Shifter sessions](https://shifter.io/docs/products/residential-proxies/sessions/).

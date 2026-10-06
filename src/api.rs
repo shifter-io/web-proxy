@@ -6,7 +6,7 @@ use crate::{
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, State as AxumState},
-    http::{HeaderMap, HeaderValue, StatusCode},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -72,6 +72,11 @@ fn country(s: &Selection) -> Result<(), ApiError> {
     Ok(())
 }
 pub fn router(state: State) -> Router {
+    let cors = tower_http::cors::CorsLayer::new()
+        .allow_origin(HeaderValue::from_str(&state.cfg.control_origin).expect("validated origin"))
+        .allow_credentials(true)
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
+        .allow_headers([CONTENT_TYPE]);
     Router::new()
         .route("/health", get(health))
         .route("/metrics", get(metrics))
@@ -82,6 +87,7 @@ pub fn router(state: State) -> Router {
         .route("/api/session/reconnect", post(reconnect))
         .route("/api/session/country", post(change))
         .layer(DefaultBodyLimit::max(1024))
+        .layer(cors)
         .fallback_service(tower_http::services::ServeDir::new(format!(
             "{}/control",
             state.cfg.web_dir
@@ -137,7 +143,12 @@ async fn start(
     response.headers_mut().insert(
         "set-cookie",
         HeaderValue::from_str(&format!(
-            "shifter_dev={v}; Path=/api; HttpOnly; SameSite=Strict; Max-Age=172800"
+            "shifter_dev={v}; Path=/api; HttpOnly; SameSite=Strict; Max-Age=172800{}",
+            if s.cfg.control_origin.starts_with("https://") {
+                "; Secure"
+            } else {
+                ""
+            }
         ))
         .unwrap(),
     );

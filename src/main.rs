@@ -33,7 +33,7 @@ async fn main() -> Result<()> {
         .with_env_filter("shifter_web=info")
         .init();
     let cfg = Config::load().await?;
-    let store = Store::new(&cfg.redis).await?;
+    let store = Store::new(&cfg.redis, cfg.redis_ca_file.as_deref()).await?;
     let state = Arc::new(App {
         cfg,
         store,
@@ -77,7 +77,10 @@ async fn main() -> Result<()> {
             HeaderValue::from_static("no-store"),
         ));
     let listener = tokio::net::TcpListener::bind(&state.cfg.listen).await?;
-    tracing::info!(role=%state.cfg.role,replica=%state.cfg.replica,"ready; local development identity only");
+    tracing::warn!(
+        "verified identity and CAPTCHA are deferred; development-cookie identity is active"
+    );
+    tracing::info!(role=%state.cfg.role,replica=%state.cfg.replica,"ready");
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;

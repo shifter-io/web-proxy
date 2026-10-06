@@ -13,6 +13,9 @@ copy_example() {
 copy_example compose.example.yaml compose.yaml
 copy_example compose.test.example.yaml compose.test.yaml
 copy_example deploy/haproxy.example.cfg deploy/haproxy.cfg
+copy_example compose.production.example.yaml compose.production.yaml
+copy_example deploy/haproxy.production.example.cfg deploy/haproxy.production.cfg
+copy_example deploy/production.example.env .env.production
 copy_example tests/fixtures/credentials.example.toml tests/fixtures/credentials.toml
 copy_example .env.example .env
 mkdir -p artifacts

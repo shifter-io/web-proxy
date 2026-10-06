@@ -4,7 +4,7 @@ import {docker} from './docker.mjs';
 import {assertRedisPrivate} from './redis-network-policy.mjs';
 let productionRejected=false;
 try {await docker(['run','--rm','-e','APP_ENV=production','shifter-web:local']);}
-catch(error){productionRejected=String(error.stderr||error.message).includes('production disabled');}
+catch(error){productionRejected=String(error.stderr||error.message).includes('production requires HTTPS');}
 assert.ok(productionRejected);
 const ids=(await docker(['compose','ps','-q'])).trim().split('\n');
 const containers=JSON.parse(await docker(['inspect',...ids]));
