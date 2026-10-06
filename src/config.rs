@@ -178,7 +178,7 @@ impl Config {
             bail!("invalid session routing");
         }
         let user = format!(
-            "customer-{}-country-{country}-strict-true-sid-{sid}-ttl-600",
+            "customer-{}-country-{country}-strict-true-sid-{sid}-ttl-600-pool-shifter",
             self.account
         );
         if user.len() > 255 {

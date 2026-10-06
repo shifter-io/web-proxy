@@ -358,8 +358,10 @@ For each destination stream, the gateway:
 The username format is:
 
 ```text
-customer-<account>-country-<country>-strict-true-sid-<128-bit-random-hex>-ttl-600
+customer-<account>-country-<country>-strict-true-sid-<128-bit-random-hex>-ttl-600-pool-shifter
 ```
+
+The final `pool-shifter` flag restricts upstream assignments to the Shifter pool. The gateway always adds it server-side; visitors cannot choose or override the pool.
 
 Account syntax and SOCKS5 credential lengths are validated. Authentication failures do not trigger a direct-connect fallback. Authenticated upstream sockets are not shared between sessions.
 
