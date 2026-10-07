@@ -180,16 +180,15 @@ impl Config {
         let production = environment == "production";
         let control_origin = val("CONTROL_ORIGIN", "http://localhost:8080");
         let runtime_origin = val("RUNTIME_ORIGIN", "http://localhost:8081");
-        let default_integrations = if production {
-            r#"[{"origin":"https://example.com","site":"shifter"},{"origin":"https://second.example.com","site":"ip-info"}]"#.to_owned()
+        let configured_integrations = if production {
+            env::var("INTEGRATIONS").context("production requires explicit INTEGRATIONS")?
         } else {
-            serde_json::json!([{"origin":control_origin,"site":"local"}]).to_string()
+            val(
+                "INTEGRATIONS",
+                &serde_json::json!([{"origin":control_origin,"site":"local"}]).to_string(),
+            )
         };
-        let integrations = integrations(
-            &val("INTEGRATIONS", &default_integrations),
-            &runtime_origin,
-            production,
-        )?;
+        let integrations = integrations(&configured_integrations, &runtime_origin, production)?;
         let redis = match env::var("REDIS_URL_FILE") {
             Ok(path) => std::fs::read_to_string(path)
                 .map_err(|_| anyhow::anyhow!("cannot read REDIS_URL_FILE"))?

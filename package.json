@@ -16,5 +16,6 @@
   "devDependencies": {
     "jsdom": "^26.1.0",
     "ws": "8.22.0"
-  }
+  },
+  "license": "MIT"
 }

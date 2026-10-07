@@ -55,7 +55,7 @@ The browser retains Back, Forward, Reload, country selection, the URL field, tim
 
 ## Shared SDK integration
 
-Initially only `https://example.com` and `https://second.example.com` are allowed in production. No `www`, HTTP, wildcard, or other subdomain is implicitly included. Loading the public JavaScript does not grant authorization; API and runtime origins are checked separately.
+The examples use reserved origins `https://example.com`, `https://second.example.com`, and `https://staging.example.com`. Set your actual origins only in the ignored production environment file; production startup requires an explicit `INTEGRATIONS` value. No `www`, HTTP, wildcard, or other subdomain is implicitly included. Loading the public JavaScript does not grant authorization; API and runtime origins are checked separately.
 
 ```html
 <div id="proxy-view" style="height:70vh"></div>
@@ -289,7 +289,7 @@ mkdir -p .secrets/https .secrets/redis-tls
 Edit the ignored `.env.production` generated from `deploy/production.example.env`:
 
 - `RUNTIME_HOST=proxy.example.net` is the public gateway hostname. Point its DNS record at the ingress host. Only HAProxy publishes ports 80 and 443. The API and gateway listeners stay on the internal ingress network; gateways have a separate outbound network for Shifter.
-- `INTEGRATIONS` maps exact HTTPS origins to stable website IDs. The production environment example keeps `https://example.com` (`shifter`) and `https://second.example.com` (`ip-info`) and adds `https://staging.example.com` (`shifter`) for staging. Origins must be unique; explicitly configured aliases may share a site ID and its bearer-identity/quota namespace. Browser storage remains separate per origin, and CAPTCHA verification still checks the exact requesting hostname. Set the same mapping in API and gateways. Website IDs namespace quotas; do not rename them during an ordinary release. The built-in fallback still allows only the two production origins; staging requires this explicit setting. No implicit `www`, other subdomains, or localhost are added.
+- `INTEGRATIONS` maps exact HTTPS origins to stable website IDs. The production environment example keeps `https://example.com` (`shifter`) and `https://second.example.com` (`ip-info`) and adds `https://staging.example.com` (`shifter`) for staging. Origins must be unique; explicitly configured aliases may share a site ID and its bearer-identity/quota namespace. Browser storage remains separate per origin, and CAPTCHA verification still checks the exact requesting hostname. Set the same mapping in API and gateways. Website IDs namespace quotas; do not rename them during an ordinary release. There is no built-in production allowlist; production startup requires this explicit setting. No implicit `www`, other subdomains, or localhost are added.
 - Set `TLS_CERT_DIR` to a directory containing one or more `.pem` files, each with the full certificate chain followed by its private key. The certificate must cover `proxy.example.net` (or the configured `RUNTIME_HOST`). Provision certificates through your existing certificate manager or ACME DNS challenge workflow. The example does not issue or renew certificates automatically. Mount only the needed server PEM files, not an entire CA/ACME account directory.
 - Set `REDIS_NETWORK` to the existing Redis Docker network. It must be an internal bridge with IPv4/IPv6 gateway mode `isolated`, no Redis published ports, and only Redis/API/gateways as members. HAProxy never joins it. For Redis on separate private infrastructure, adapt the application state-network attachment and firewall policy to that deployment; the supplied Compose topology assumes a shared Docker network.
 - Set `REDIS_URL_SECRET_FILE` to an ignored file containing `redis://USER:URL_ENCODED_PASSWORD@PRIVATE_REDIS_HOST:6379/0` for the current private-network/password deployment. The hostname must resolve only to private addresses. Use a dedicated named ACL user, with unauthenticated default access disabled. No Redis TLS is required for this explicitly requested phase. Optional `rediss://` is also supported, with certificate and hostname verification.
@@ -599,7 +599,7 @@ node tests/live-smoke.mjs
 node tests/live-tls.mjs
 ```
 
-The country test checks US and DE using `second.example.com/json`, with three samples per country including a Wisp reconnect. The TLS test fetches `https://example.com` through the Wisp/Shifter path with Node certificate verification enabled.
+Set `IP_CHECK_HOST` to your real IP-information endpoint before running live smoke checks (and `IP_CHECK_PATH` if its path differs from `/json`). The country test checks US and DE using that endpoint, with three samples per country including a Wisp reconnect. The TLS test fetches `https://example.com` through the Wisp/Shifter path with Node certificate verification enabled.
 
 The scripts inspect existing usage in the dedicated live-development Redis DB 0 and reserve bounded per-visitor quotas within a cumulative **20 MiB** test ceiling. Run them serially on a dedicated stack. This is test accounting, not a global production billing limiter; unrelated concurrent visitors or simultaneous test runners are outside that cumulative-test calculation. Do not clear DB 0 to bypass the smoke-test cap.
 
@@ -767,7 +767,7 @@ This repository does not grant a blanket license for third-party components. Ups
 - Validate representative public websites and supported authentication flows; define a compatibility policy.
 - Provision the real v2 CAPTCHA key/secret and register both domains; verify real Google challenge acceptance on both websites. Consider stronger identity and abuse monitoring if anonymous quotas are insufficient.
 - Add broader service-level admission controls, operational resource limits, and sustained load testing.
-- Review engine isolation and escape risks for the requested original-site integration: controls at the configured Shifter origin and the runtime at `proxy.example.net` are distinct origins on the same registrable domain.
+- Review engine isolation and escape risks for the requested original-site integration: controls at the configured Shifter origin and the runtime at `proxy.example.net` are distinct origins; evaluate the actual deployment domains.
 - Provision real-domain certificates and renewal on the deployment host using the HTTPS/WSS example below; complete browser acceptance against those domains.
 - Verify the existing production Redis deployment against the rules above: private endpoints, named ACL users, and network access restrictions; verify certificates if optional Redis TLS is enabled. Client ACL/TLS support is implemented and covered by local integration checks.
 - Establish regional Redis/state availability and an explicit cross-region recovery protocol that preserves allowance but rotates residential assignment.
@@ -778,3 +778,7 @@ This repository does not grant a blanket license for third-party components. Ups
 The HTTPS implementation and tests run locally. Production DNS changes, certificate issuance, and execution on a deployment host are separate operational steps; no remote deployment was performed.
 
 References: [Scramjet](https://github.com/MercuryWorkshop/scramjet), [epoxy-tls and Wisp](https://github.com/MercuryWorkshop/epoxy-tls), [HAProxy TCP configuration](https://www.haproxy.com/documentation/haproxy-configuration-tutorials/protocol-support/tcp/), [Shifter gateway and regions](https://shifter.io/docs/products/residential-proxies/gateway-and-auth/), [Shifter geo-targeting](https://shifter.io/docs/products/residential-proxies/geo-targeting/), and [Shifter sessions](https://shifter.io/docs/products/residential-proxies/sessions/).
+
+## License
+
+The project code is available under the [MIT License](LICENSE). Third-party dependencies, fonts, and assets retain their own licenses.

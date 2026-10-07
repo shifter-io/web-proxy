@@ -2,8 +2,12 @@ import assert from 'node:assert/strict';
 import {writeFile} from 'node:fs/promises';
 import {docker} from './docker.mjs';
 import {assertRedisPrivate} from './redis-network-policy.mjs';
-let productionRejected=false;
+let integrationsRequired=false;
 try {await docker(['run','--rm','-e','APP_ENV=production',process.env.CONFIG_TEST_IMAGE || 'shifter-web:local']);}
+catch(error){integrationsRequired=String(error.stderr||error.message).includes('production requires explicit INTEGRATIONS');}
+assert.ok(integrationsRequired);
+let productionRejected=false;
+try {await docker(['run','--rm','-e','APP_ENV=production','-e','INTEGRATIONS=[{"origin":"https://example.com","site":"example"}]',process.env.CONFIG_TEST_IMAGE || 'shifter-web:local']);}
 catch(error){productionRejected=String(error.stderr||error.message).includes('production requires HTTPS');}
 assert.ok(productionRejected);
 const ids=(await docker(['compose','ps','-q'])).trim().split('\n');
