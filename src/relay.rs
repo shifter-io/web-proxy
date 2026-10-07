@@ -367,10 +367,7 @@ async fn resolve(packet: &ConnectPacket, state: &State) -> Result<IpAddr> {
     {
         bail!("host blocked");
     }
-    let addresses: Vec<IpAddr> = tokio::net::lookup_host((host.as_str(), packet.port))
-        .await?
-        .map(|x| x.ip())
-        .collect();
+    let addresses = state.resolver.lookup(&host).await?;
     if addresses.is_empty()
         || addresses
             .iter()
@@ -441,7 +438,11 @@ async fn connect(
         if reply[0] == 5 && matches!(reply[1], 1 | 3 | 4 | 5 | 6) {
             return Err(UpstreamUnavailable.into());
         }
-        bail!("upstream destination unavailable");
+        bail!(
+            "upstream destination unavailable (version {}, reply {})",
+            reply[0],
+            reply[1]
+        );
     }
     let count = match reply[3] {
         1 => 4,
@@ -470,7 +471,8 @@ async fn forward(
     .await
     {
         Ok(Ok(ip)) => ip,
-        _ => {
+        failure => {
+            tracing::debug!(?failure, "Destination lookup or policy rejected stream");
             state.metrics.rejected.fetch_add(1, Ordering::Relaxed);
             let _ = timeout(
                 Duration::from_secs(1),
@@ -488,6 +490,7 @@ async fn forward(
     let tcp = match connection {
         Ok(Ok(tcp)) => tcp,
         failure => {
+            tracing::debug!(?failure, "Upstream connection failed before forwarding");
             let transient = match failure {
                 Err(_) => true,
                 Ok(Err(error)) => error.is::<std::io::Error>() || error.is::<UpstreamUnavailable>(),

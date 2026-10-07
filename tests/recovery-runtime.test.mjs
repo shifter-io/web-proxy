@@ -15,7 +15,7 @@ async function runtime(t) {
   }
   const controller={postMessage:(data,ports)=>{lookups.push({data,reply:value=>ports[0].postMessage(value)});}};
   const bridge={query:'channel=fixture-generation',send:(type,data)=>sent.push({type,...data}),accepts:()=>true};
-  await runInNewContext(source,{createRuntimeBridge:async()=>bridge,document:window.document,window,location:window.location,navigator:{serviceWorker:{register:async(url,options)=>{assert.equal(options.scope,'/');assert.equal(url,'/sw.js?'+bridge.query);controller.scriptURL='https://runtime.test'+url;},ready:Promise.resolve(),controller}},$scramjetLoadController:()=>({ScramjetController:class {async init(){}createFrame(){return new Frame();}}}),BareMux:{BareMuxConnection:class {async setTransport(){}}},URL,MessageChannel,setTimeout,clearTimeout,queueMicrotask,console});
+  await runInNewContext(source,{prepareRuntimeData:async()=>{},createRuntimeBridge:async()=>bridge,document:window.document,window,location:window.location,navigator:{serviceWorker:{register:async(url,options)=>{assert.equal(options.scope,'/');assert.equal(url,'/sw.js?'+bridge.query);controller.scriptURL='https://runtime.test'+url;},ready:Promise.resolve(),controller}},$scramjetLoadController:()=>({ScramjetController:class {async init(){}createFrame(){return new Frame();}}}),BareMux:{BareMuxConnection:class {async setTransport(){}}},URL,MessageChannel,setTimeout,clearTimeout,queueMicrotask,console});
   t.after(()=>window.close());
   async function command(command,data={}){window.dispatchEvent(new window.MessageEvent('message',{data:{command,...data}}));await flush();}
   async function load(marker){

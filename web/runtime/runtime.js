@@ -17,6 +17,7 @@
     const { ScramjetController } = $scramjetLoadController();
     const scramjet = new ScramjetController({flags:{syncxhr:false},prefix:'/service/',files:{wasm:'/vendor/scram/scramjet.wasm.wasm',all:'/vendor/scram/scramjet.all.js',sync:'/vendor/scram/scramjet.sync.js'}});
     await scramjet.init();
+    await prepareRuntimeData();
     // A crashed renderer can leave the old worker's engine/transport state
     // unusable. Install a fresh worker for this outer frame, retaining its DB
     // and cookie jar. Waiting for ready alone can return the previous worker.
@@ -117,5 +118,5 @@
       } catch (error) { if (version !== commandVersion) return; console.error('Runtime start failed:','Transport initialization error'); send('error',{message:'The connection could not be established. Stop browsing and try again; your remaining allowance is preserved.'}); }
     });
     send('ready', {heartbeat:true});
-  } catch { send('error',{message:'The browser runtime could not initialize. Use a browser with service worker and WebAssembly support.'}); }
+  } catch { send('error',{message:'The browser runtime could not initialize. Reload to try again.'}); }
 })();

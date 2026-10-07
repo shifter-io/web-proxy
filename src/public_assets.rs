@@ -66,6 +66,8 @@ fn public_path(kind: Kind, path: &str) -> Option<&str> {
             file,
             "index.html"
                 | "runtime.js"
+                | "runtime-data.js"
+                | "public-suffix-list.dat"
                 | "bridge.js"
                 | "sw.js"
                 | "transport-compat.js"

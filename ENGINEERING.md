@@ -111,6 +111,12 @@ SDK 1.0.3 retries API reads and ticket issuance up to twice (500/1000 ms backoff
 
 The runtime routes Scramjet v1's injected WASM script through the engine's JavaScript wrapper; raw WASM fetches and reset assets still bypass engine configuration. On browsers without transferable request streams, the service worker buffers request bodies up to 8 MiB before the first BareMux send, preserving method, headers and bytes. Larger buffered uploads fail before sending. Capable browsers keep streaming. This addresses a reproducible request-stream compatibility gap; it does not guarantee that Google will accept a proxy IP or that every CAPTCHA works. A destination CAPTCHA remains on its existing SID and is never used as a reason to rotate an IP automatically.
 
+The runtime seeds Scramjet v1's Public Suffix List cache from a bundled snapshot before starting destination requests. Without that cache, concurrent cross-origin requests download the list through the residential connection; a failed list download can abort an unrelated script or image. Initialization waits for the IndexedDB transaction to commit and fails if the bundled data is missing or invalid. The one-hour cache covers the maximum 30-minute session and is refreshed whenever the outer runtime is recreated. No domain rules are removed and no destination checks are bypassed.
+
+An incomplete successful GET script or stylesheet response is retried once on the same transport before Scramjet's empty 500 reaches the page. This only applies when reading a 2xx response body fails; website HTTP errors, connection refusals, rewriting errors, other resource types, and non-GET requests are not retried by this path. Both attempts remain subject to the existing session authorization and byte accounting. This does not establish the cause of every blank page or guarantee YouTube compatibility.
+
+Gateway DNS lookups for one hostname share an in-flight result, with at most 512 cached entries lasting 30 seconds. One failed lookup is retried within the existing connection timeout. Every returned address still passes the destination policy, and the validated IP is pinned in the SOCKS request. `RUST_LOG=shifter_web=debug` enables connection-stage diagnostics without logging destination URLs, session IDs, or upstream credentials; the default remains `shifter_web=info`.
+
 ### CAPTCHA configuration
 
 Register both production website domains and the explicitly enabled staging hostname `staging.example.com` on the existing standard v2 checkbox key. The **site key is public**, including in GitHub. The **secret is private** and must never enter SDK code, HTML, URLs, repository files, or logs. Set `RECAPTCHA_SITE_KEY` and mount `RECAPTCHA_SECRET_FILE` only in the API container. The API needs outbound HTTPS to Google's fixed SiteVerify endpoint. Google responses must be successful, free of error codes, and match the exact caller hostname. Google enforces the response token's two-minute lifetime; the returned challenge timestamp is validated as a load timestamp, not mistaken for when the user solved it. A SHA-256 token reservation in Redis rejects concurrent replay; raw CAPTCHA responses are not stored. See [Google verification](https://developers.google.com/recaptcha/docs/verify).
@@ -750,6 +756,7 @@ Local-only configuration, artifacts, generated dependencies, and pre-existing re
 | Scramjet | Release tarball `1.1.0`, locked in `package-lock.json` |
 | bare-mux | `2.1.9` |
 | Epoxy transport | `2.1.19` |
+| Public Suffix List | `2026-10-07_07-28-19_UTC`, commit `3929462652695bad04f0a27afb600974014a3c8b` |
 | wisp-mux | epoxy-tls Git revision `0c11678d72a636c3a4bc723db87e03e7b888eaf9` |
 | Node build stage | Node 24 image pinned by digest |
 | Rust build stage | Rust 1.94.1 image pinned by digest |
@@ -758,6 +765,8 @@ Local-only configuration, artifacts, generated dependencies, and pre-existing re
 Use `npm ci --ignore-scripts` and Cargo’s `--locked` mode. The Docker build follows those locked inputs and generates browser assets during the build. Container digests and lockfiles improve repeatability; this is not a claim of fully bit-for-bit reproducible images, since operating-system packages are installed during the build.
 
 Review transport/runtime compatibility when updating dependencies. Their contracts, browser isolation behavior, service-worker caching, and Wisp protocol behavior matter as much as version numbers. The pinned versions and known browser gaps need review before any public rollout.
+
+Refresh `web/runtime/public-suffix-list.dat` from the [official Public Suffix List](https://publicsuffix.org/list/public_suffix_list.dat) when maintaining runtime dependencies. Keep its version, commit, and MPL-2.0 license header, update the pin above, and run the runtime-data and browser tests. This snapshot uses the pinned Scramjet v1 IndexedDB schema; review that contract when upgrading the engine.
 
 Regenerate the standalone README after editing Markdown:
 

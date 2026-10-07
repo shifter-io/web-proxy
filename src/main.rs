@@ -1,6 +1,7 @@
 mod api;
 mod captcha;
 mod config;
+mod dns;
 mod public_assets;
 mod relay;
 mod sdk_api;
@@ -27,6 +28,7 @@ pub struct App {
     pub cfg: Config,
     pub store: Store,
     pub metrics: Metrics,
+    pub resolver: dns::Resolver,
     pub captcha_client: reqwest::Client,
 }
 pub type State = Arc<App>;
@@ -34,7 +36,10 @@ pub type State = Arc<App>;
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter("shifter_web=info")
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "shifter_web=info".into()),
+        )
         .init();
     let cfg = Config::load().await?;
     let store = Store::new(&cfg.redis, cfg.redis_ca_file.as_deref()).await?;
@@ -42,6 +47,7 @@ async fn main() -> Result<()> {
         cfg,
         store,
         metrics: Metrics::default(),
+        resolver: dns::Resolver::default(),
         captcha_client: reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(8))
             .redirect(reqwest::redirect::Policy::none())

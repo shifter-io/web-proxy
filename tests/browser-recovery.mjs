@@ -48,6 +48,12 @@ try {
   const destination=()=>page.frames().find(frame=>frame.url().startsWith(runtimeOrigin+'/service/'));
   const runtime=()=>page.frames().find(frame=>frame.url().startsWith(runtimeOrigin+'/index.html'));
   await destination().waitForSelector('#identity');
+  // The synthetic SOCKS server cannot serve publicsuffix.org over HTTPS.
+  // Cold-profile cross-origin modules must not depend on that network fetch.
+  await destination().waitForFunction(()=>window.crossOriginModuleLoaded===true);
+  await destination().waitForFunction(()=>window.incompleteScriptRecovered===true);
+  results.push('An interrupted 200 script body is fetched again once and executes without restarting the session');
+  results.push('Cross-origin modules load with a cold profile and no external Public Suffix List service');
   const identity=await destination().$eval('#identity',node=>node.textContent);
   const before=await page.evaluate(()=>testProxy.getState().session);
   await destination().evaluate(()=>{document.cookie='recovery_marker=preserved; Path=/';});

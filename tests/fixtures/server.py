@@ -6,7 +6,9 @@ PAGE = '''<!doctype html><html><head><title>Shifter fixture</title></head><body 
 <h1>Proxy test destination</h1><p id="identity">COUNTRY / SID</p>
 <nav><a href="/next">Next page</a> · <a href="/redirect">Redirect</a> · <a href="http://second.test/">Second origin</a> · <a href="/logout">Log out</a></nav>
 <p id="result">JavaScript request pending</p><form action="/login" method="post"><label>Synthetic username <input name="username" value="alice"></label><button>Sign in</button></form>
-<p id="login">LOGIN</p><script>fetch('/api').then(r=>r.json()).then(d=>document.getElementById('result').textContent='JavaScript fetch OK: '+d.country);</script></body></html>'''
+<p id="login">LOGIN</p><script type="module" src="http://second.test/cross-origin.js"></script><script src="/truncated.js"></script><script>fetch('/api').then(r=>r.json()).then(d=>document.getElementById('result').textContent='JavaScript fetch OK: '+d.country);</script></body></html>'''
+
+truncated_once = set()
 
 async def handle(reader, writer):
     try:
@@ -42,6 +44,15 @@ async def handle(reader, writer):
         identity={'country':country,'sid':sid,'ip':'198.51.100.'+str(int(hashlib.sha256(sid.encode()).hexdigest()[:2],16)), 'host':headers.get('host','')}
         if uri.path in ['/api','/ip']:
             payload=json.dumps(identity).encode();content_type='application/json'
+        elif uri.path=='/cross-origin.js':
+            payload=b'window.crossOriginModuleLoaded = true;';content_type='application/javascript'
+            extra='Access-Control-Allow-Origin: *\r\n'
+        elif uri.path=='/truncated.js':
+            if sid not in truncated_once:
+                truncated_once.add(sid)
+                writer.write(b'HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\nContent-Length: 100\r\nConnection: close\r\n\r\nwindow.')
+                await writer.drain(); return
+            payload=b'window.incompleteScriptRecovered = true;';content_type='application/javascript'
         elif uri.path=='/bytes':
             count=min(int(parse_qs(uri.query).get('n',['1024'])[0]),4*1024*1024)
             payload=b'x'*count;content_type='application/octet-stream'
