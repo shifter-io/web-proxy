@@ -57,6 +57,7 @@ test('runtime reports document loads, ignores anchors/cancelled navigation and r
     createFrame() { const frame = new Frame(); frames.push(frame); return frame; }
   }
   await runInNewContext(source, {
+    prepareRuntimeData:async()=>{},
     createRuntimeBridge:async () => ({query:'bound', send:(type,data={})=>messages.push({type,...data}), accepts:event=>event.origin==='http://control.test' && event.source===parent && event.data?.source==='shifter-control'}),
     parent, window, URL, queueMicrotask, console,
     location:{protocol:'http:',host:'runtime.test',replace:() => {}},

@@ -34,7 +34,7 @@ For the product overview, see [README.md](README.md). An offline HTML version of
 ## What is included
 
 - Trusted browsing controls: destination input, country selector, Browse, Back, Forward, Reload, Stop, remaining time, remaining bytes, and status messages.
-- An embedded Scramjet runtime using bare-mux and Epoxy transport.
+- An embedded Scramjet runtime using bare-mux and libcurl transport.
 - Two Rust gateway replicas, a Rust session API, Redis, and an HAProxy connection balancer.
 - Country selection and a cryptographically random 128-bit SID per browsing assignment.
 - Shared time/byte allowances, single-use transport tickets, one active connection per visitor, stream admission limits, revocation, and expiry.
@@ -111,6 +111,20 @@ SDK 1.0.3 retries API reads and ticket issuance up to twice (500/1000 ms backoff
 
 The runtime routes Scramjet v1's injected WASM script through the engine's JavaScript wrapper; raw WASM fetches and reset assets still bypass engine configuration. On browsers without transferable request streams, the service worker buffers request bodies up to 8 MiB before the first BareMux send, preserving method, headers and bytes. Larger buffered uploads fail before sending. Capable browsers keep streaming. This addresses a reproducible request-stream compatibility gap; it does not guarantee that Google will accept a proxy IP or that every CAPTCHA works. A destination CAPTCHA remains on its existing SID and is never used as a reason to rotate an IP automatically.
 
+The runtime seeds Scramjet v1's Public Suffix List cache from a bundled snapshot before starting destination requests. Without that cache, concurrent cross-origin requests download the list through the residential connection; a failed list download can abort an unrelated script or image. Initialization waits for the IndexedDB transaction to commit and fails if the bundled data is missing or invalid. The one-hour cache covers the maximum 30-minute session and is refreshed whenever the outer runtime is recreated. No domain rules are removed and no destination checks are bypassed.
+
+An incomplete successful GET script or stylesheet response is retried once on the same transport before Scramjet's empty 500 reaches the page. This only applies when reading a 2xx response body fails; website HTTP errors, connection refusals, rewriting errors, other resource types, and non-GET requests are not retried by this path. Both attempts remain subject to the existing session authorization and byte accounting. This does not establish the cause of every blank page or guarantee YouTube compatibility.
+
+The browser transport is pinned to libcurl-transport 1.5.2, which integrates with the existing bare-mux worker and authenticated Wisp gateway. In local US comparisons, Epoxy returned failed response-body reads for YouTube application bundles and left the page on placeholders, even when video playback worked. Changing only the transport to libcurl loaded those bundles and the full interface. The exact defect inside Epoxy remains unconfirmed; this change does not require a Scramjet v2 migration or a new residential session.
+
+The vendoring step patches libcurl.js to propagate transfer failures to the response stream after headers have arrived. Without that patch, an interrupted script can look like a successful truncated response. The synthetic browser fixture deliberately interrupts a 200 script body and verifies the single retry executes the complete script. TLS verification stays enabled; local US checks accept a valid certificate and reject expired, wrong-hostname, and self-signed certificates.
+
+The rewritten-document bootstrap disables the native `Document.startViewTransition` and `Element.startViewTransition` APIs before destination scripts run. Sites select their normal DOM-update fallback. This avoids a reproduced Chrome 155 compositor crash in a proxied YouTube frame; the embedding website and trusted runtime retain the native APIs. Local crash dumps identify a compositor `map::at` failure, rather than establishing an out-of-memory cause. Dependency builds fail if either patched upstream location changes, so upgrades require explicit review.
+
+The gateway explicitly flushes queued Wisp CONTINUE packets after reading upload data. The pinned Wisp library otherwise leaves them buffered until another outgoing write, which can stall an upload waiting for renewed credits. A 64 KiB binary POST regression crosses the four-packet receive window and checks the complete response byte-for-byte. TLS certificate verification, stream admission, destination policy, authorization, expiry and byte accounting remain enabled.
+
+Gateway DNS lookups for one hostname share an in-flight result, with at most 512 cached entries lasting 30 seconds. This includes the shared Shifter upstream hostname, avoiding a separate lookup for every destination stream. One failed lookup is retried within the existing connection timeout. Every resolved destination address still passes the destination policy, and the validated IP is pinned in the SOCKS request. `RUST_LOG=shifter_web=debug` enables connection-stage diagnostics without logging destination URLs, session IDs, or upstream credentials; the default remains `shifter_web=info`.
+
 ### CAPTCHA configuration
 
 Register both production website domains and the explicitly enabled staging hostname `staging.example.com` on the existing standard v2 checkbox key. The **site key is public**, including in GitHub. The **secret is private** and must never enter SDK code, HTML, URLs, repository files, or logs. Set `RECAPTCHA_SITE_KEY` and mount `RECAPTCHA_SECRET_FILE` only in the API container. The API needs outbound HTTPS to Google's fixed SiteVerify endpoint. Google responses must be successful, free of error codes, and match the exact caller hostname. Google enforces the response token's two-minute lifetime; the returned challenge timestamp is validated as a load timestamp, not mistaken for when the user solved it. A SHA-256 token reservation in Redis rejects concurrent replay; raw CAPTCHA responses are not stored. See [Google verification](https://developers.google.com/recaptcha/docs/verify).
@@ -142,7 +156,7 @@ Visitor browser
   +-- http://localhost:8081
          HAProxy TCP listener / leastconn
              -> Rust gateway A or B
-                 |-- serves Scramjet, bare-mux, Epoxy, and service worker
+                 |-- serves Scramjet, bare-mux, libcurl, and service worker
                  |-- redeems Wisp ticket and claims connection ownership
                  |-- validates destination and reserves destination bytes
                  |
@@ -463,7 +477,7 @@ Different SIDs represent independent assignment requests. They do not guarantee 
 
 ## Browser integration and isolation
 
-The embedding website supplies its UI. The runtime on a separate origin owns Scramjet, its service worker, bare-mux SharedWorker, Epoxy, and a sandboxed destination iframe. No service worker is installed on either website by the SDK. Runtime and reset documents validate the configured parent origin, actual parent window, protocol version, and per-instance channel identifier. Unknown or stale messages are ignored. `frame-ancestors` limits browser embedding to self and configured websites.
+The embedding website supplies its UI. The runtime on a separate origin owns Scramjet, its service worker, bare-mux SharedWorker, libcurl, and a sandboxed destination iframe. No service worker is installed on either website by the SDK. Runtime and reset documents validate the configured parent origin, actual parent window, protocol version, and per-instance channel identifier. Unknown or stale messages are ignored. `frame-ancestors` limits browser embedding to self and configured websites.
 
 The integration does not require site-wide COOP/COEP headers. The pinned Scramjet version runs with synchronous XHR disabled. Destination features requiring cross-origin isolation or SharedArrayBuffer are not supported in this mode. Browser service-worker, SharedWorker, WASM, and third-party storage restrictions can still affect compatibility; the SDK reports initialization errors/timeouts. It cannot override a website's restrictive CSP. Allow the SDK script/module origin, API connect origin, runtime frame origin, and Google's reCAPTCHA script/frame/connect resources as appropriate to that website's policy. Use CSP nonces for injected scripts/styles when required.
 
@@ -633,7 +647,20 @@ HTTPS_TEST_IMAGE=shifter-web:sdk-check HTTPS_TEST_REDIS_TLS=1 node tests/https-d
 
 The SDK runner creates a separate disposable local project on loopback ports 8180/8181, runs the origin/CAPTCHA/identity/cache checks, transport/quota integration tests, stream admission checks, and Redis network-policy checks, then removes that project. It never rewrites the developer's active configuration. `--browser` additionally exercises a forced Chrome renderer crash and cross-origin navigation recovery before cleanup. `--keep` retains it for further browser checks and writes its cleanup context under ignored `artifacts/`.
 
-Recovery tests cover hidden error documents, worker capability validation, website HTTP-error passthrough, POST safety, stale frames, retry limits, Stop/destruction cancellation, gateway-attested SID rotation, concurrent recovery, and unchanged quota/expiry. The TLS fixture also exercises recovery under the production Redis ACL and verifies that storage loss denies recovery. Unit runtime tests use a simulated DOM/service-worker bridge. `node tests/browser-recovery.mjs` also runs local system Chrome in a disposable profile against the stack kept by `tests/run-sdk-tests.mjs --keep`: it crashes the cross-site runtime renderer with CDP, verifies automatic recovery and persisted state, and exercises the worker error document under a cross-origin embed. It never opens the person’s normal browser profile. The YouTube-after-BBC crash cause remains unconfirmed; synthetic crash recovery does not establish its memory or engine cause. A real-site reproduction and renderer memory/crash diagnostics remain necessary before claiming the original crash is eliminated.
+Recovery tests cover hidden error documents, worker capability validation, website HTTP-error passthrough, POST safety, stale frames, retry limits, Stop/destruction cancellation, gateway-attested SID rotation, concurrent recovery, and unchanged quota/expiry. The TLS fixture also exercises recovery under the production Redis ACL and verifies that storage loss denies recovery. Unit runtime tests use a simulated DOM/service-worker bridge. `node tests/browser-recovery.mjs` also runs local system Chrome in a disposable profile against the stack kept by `tests/run-sdk-tests.mjs --keep`: it crashes the cross-site runtime renderer with CDP, verifies automatic recovery and persisted state, and exercises the worker error document under a cross-origin embed. It never opens the person’s normal browser profile.
+
+Local live US investigation used an explicitly approved 10 GB cumulative ceiling on a separate, quota-bounded stack; this does not change the default 20 MiB smoke-test ceiling. Epoxy response-body failures and a Chrome compositor crash were reproduced separately. Production gateway throttling was not established as their cause. Live acceptance results are recorded below; synthetic tests alone do not establish destination compatibility.
+
+Live acceptance on 2026-10-08 used system Chrome 155 in disposable visible profiles, a cross-origin local embed, the final runtime assets, and real US residential forwarding. No browser feature flags or injected test workaround were used for acceptance.
+
+| Scenario | Observed result |
+| --- | --- |
+| Example → Wikipedia → BBC.com → YouTube | Full YouTube interface; the entire 19-second video played; stable through the 90-second observation |
+| BBC.co.uk → wait 75 seconds → YouTube | BBC images rendered; full YouTube interface and the entire 19-second video played |
+| YouTube as the first page | Full interface and buffered video; a normal Play click produced 11 seconds of playback |
+| Return to Example.com | Loaded after each run; repeated sequence, delayed sequence and fresh-page checks retained country/expiry and the declining byte allowance |
+
+There were no renderer crashes in these acceptance runs and no failed YouTube application scripts in the successful playback runs. Some media fetches returned errors while YouTube successfully used another media response. Separate exits returned a Google traffic challenge or YouTube sign-in prompt; those are recorded as destination restrictions, not playback passes. The changes were validated locally; deployment and acceptance on the actual embedding websites remain separate steps.
 
 Unit tests cover modal cancellation, concurrent clicks, errors, bearer requests, stale messages, storage denial, cleanup, and Google challenge focus handling. The TLS fixture seeds a verified synthetic identity directly in its private Redis for WSS testing; it does not claim to solve a real CAPTCHA or expose a production bypass. Real credentials are never used by synthetic tests. Local browser checks exercised the branded and minimal UIs on different local site origins, mobile and desktop browsing, cancellation, and Stop/cleanup. Google’s live widget script was unavailable in that browser session; synthetic verification was used for successful session flows. Real Google challenge acceptance on the two production websites remains outstanding.
 
@@ -749,7 +776,8 @@ Local-only configuration, artifacts, generated dependencies, and pre-existing re
 | --- | --- |
 | Scramjet | Release tarball `1.1.0`, locked in `package-lock.json` |
 | bare-mux | `2.1.9` |
-| Epoxy transport | `2.1.19` |
+| libcurl transport | `1.5.2` (bundled libcurl.js `0.7.4`) |
+| Public Suffix List | `2026-10-07_07-28-19_UTC`, commit `3929462652695bad04f0a27afb600974014a3c8b` |
 | wisp-mux | epoxy-tls Git revision `0c11678d72a636c3a4bc723db87e03e7b888eaf9` |
 | Node build stage | Node 24 image pinned by digest |
 | Rust build stage | Rust 1.94.1 image pinned by digest |
@@ -758,6 +786,8 @@ Local-only configuration, artifacts, generated dependencies, and pre-existing re
 Use `npm ci --ignore-scripts` and Cargo’s `--locked` mode. The Docker build follows those locked inputs and generates browser assets during the build. Container digests and lockfiles improve repeatability; this is not a claim of fully bit-for-bit reproducible images, since operating-system packages are installed during the build.
 
 Review transport/runtime compatibility when updating dependencies. Their contracts, browser isolation behavior, service-worker caching, and Wisp protocol behavior matter as much as version numbers. The pinned versions and known browser gaps need review before any public rollout.
+
+Refresh `web/runtime/public-suffix-list.dat` from the [official Public Suffix List](https://publicsuffix.org/list/public_suffix_list.dat) when maintaining runtime dependencies. Keep its version, commit, and MPL-2.0 license header, update the pin above, and run the runtime-data and browser tests. This snapshot uses the pinned Scramjet v1 IndexedDB schema; review that contract when upgrading the engine.
 
 Regenerate the standalone README after editing Markdown:
 
@@ -785,7 +815,7 @@ This repository does not grant a blanket license for third-party components. Ups
 
 The HTTPS implementation and tests run locally. Production DNS changes, certificate issuance, and execution on a deployment host are separate operational steps; no remote deployment was performed.
 
-References: [Scramjet](https://github.com/MercuryWorkshop/scramjet), [epoxy-tls and Wisp](https://github.com/MercuryWorkshop/epoxy-tls), [HAProxy TCP configuration](https://www.haproxy.com/documentation/haproxy-configuration-tutorials/protocol-support/tcp/), [Shifter gateway and regions](https://shifter.io/docs/products/residential-proxies/gateway-and-auth/), [Shifter geo-targeting](https://shifter.io/docs/products/residential-proxies/geo-targeting/), and [Shifter sessions](https://shifter.io/docs/products/residential-proxies/sessions/).
+References: [Scramjet](https://github.com/MercuryWorkshop/scramjet), [libcurl transport](https://github.com/MercuryWorkshop/libcurl-transport), [Wisp gateway library](https://github.com/MercuryWorkshop/epoxy-tls), [HAProxy TCP configuration](https://www.haproxy.com/documentation/haproxy-configuration-tutorials/protocol-support/tcp/), [Shifter gateway and regions](https://shifter.io/docs/products/residential-proxies/gateway-and-auth/), [Shifter geo-targeting](https://shifter.io/docs/products/residential-proxies/geo-targeting/), and [Shifter sessions](https://shifter.io/docs/products/residential-proxies/sessions/).
 
 ## License
 

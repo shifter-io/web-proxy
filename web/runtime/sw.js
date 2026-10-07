@@ -33,6 +33,39 @@ function unavailable(failure) {
 }
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', event => event.waitUntil(self.clients.claim()));
+async function fetchResource(event) {
+  // Scramjet catches a failed response-body read and turns it into an empty
+  // 500. A single lost application bundle then leaves a page on its skeleton.
+  // Retry only an incomplete successful GET script/style response, once, on
+  // the same authorized transport. Website errors and rewriting errors pass on.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let incomplete = false;
+    const context = Object.create(scramjet);
+    context.dispatch = scramjet.dispatch?.bind(scramjet);
+    context.dispatchEvent = scramjet.dispatchEvent.bind(scramjet);
+    context.client = new Proxy(scramjet.client, {get(target, name) {
+      if (name === 'fetch') return async (...args) => {
+        const response = await target.fetch(...args);
+        if (response.status >= 200 && response.status < 300) {
+          for (const method of ['arrayBuffer', 'text']) {
+            const read = response[method].bind(response);
+            response[method] = async () => {
+              try { return await read(); }
+              catch (error) { incomplete = true; throw error; }
+            };
+          }
+        }
+        return response;
+      };
+      const value = target[name];
+      return typeof value === 'function' ? value.bind(target) : value;
+    }});
+    const response = await context.fetch(event);
+    if (!incomplete || attempt || event.request.signal?.aborted) return response;
+    await new Promise(resolve => setTimeout(resolve, 150));
+    if (event.request.signal?.aborted) return response;
+  }
+}
 self.addEventListener('fetch', event => {
   event.respondWith((async () => {
     // Runtime/reset assets must remain reachable after reset clears the engine DB.
@@ -43,7 +76,10 @@ self.addEventListener('fetch', event => {
     if (url.origin !== self.location.origin || (!url.pathname.startsWith('/service/') && !wasmScript)) return fetch(event.request);
     await scramjet.loadConfig();
     if (!scramjet.route(event)) return fetch(event.request);
-    if (event.request.mode !== 'navigate') return scramjet.fetch(event);
+    if (event.request.mode !== 'navigate') {
+      if (url.pathname.startsWith('/service/') && event.request.method === 'GET' && ['script','style'].includes(event.request.destination)) return fetchResource(event);
+      return scramjet.fetch(event);
+    }
     let transportFailure, destination, responded = false;
     // Per-request facade keeps concurrent frames and subresources independent.
     const context = Object.create(scramjet);

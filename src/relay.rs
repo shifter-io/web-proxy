@@ -14,10 +14,10 @@ use axum::{
     response::Response,
 };
 use bytes::Bytes;
-use futures_util::{Sink, StreamExt};
+use futures_util::{Sink, SinkExt, StreamExt};
 use serde::Deserialize;
 use std::{
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
@@ -25,7 +25,7 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
-    sync::{Mutex, OwnedSemaphorePermit, Semaphore},
+    sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore},
     task::JoinSet,
     time::timeout,
 };
@@ -232,6 +232,7 @@ async fn run(socket: WebSocket, state: State, session: Session, owner: String) {
         let (mux, driver) = result.with_no_required_extensions();
         let mut driver = tokio::spawn(driver);
         let cancel = CancellationToken::new();
+        let flush = Arc::new(Notify::new());
         let permits = Arc::new(Semaphore::new(state.cfg.max_streams));
         let pending = Arc::new(Semaphore::new(state.cfg.max_streams * 2));
         let rate_gate = Arc::new(Mutex::new(()));
@@ -244,6 +245,16 @@ async fn run(socket: WebSocket, state: State, session: Session, owner: String) {
                     if !state.store.heartbeat(&session,&owner).await.unwrap_or(false) { break; }
                 },
                 _=cancel.cancelled()=>break,
+                _=flush.notified()=>{
+                    // The pinned Wisp reader queues CONTINUE with start_send
+                    // without flushing. SplitSink retains it until another
+                    // write, deadlocking uploads that await renewed credits.
+                    let sent=timeout(Duration::from_secs(5),async {
+                        let mut writer=mux.lock_ws().await?;
+                        writer.flush().await
+                    }).await;
+                    if !matches!(sent,Ok(Ok(()))) { break; }
+                },
                 Some(_)=streams.join_next(),if !streams.is_empty()=>{},
                 incoming=mux.wait_for_stream()=>{
                     let Some((packet,stream))=incoming else {break};
@@ -256,7 +267,7 @@ async fn run(socket: WebSocket, state: State, session: Session, owner: String) {
                     }
                     let queued=queued.unwrap(); let s=state.clone(); let context=session.clone();
                     let permits=permits.clone(); let rate_gate=rate_gate.clone();
-                    let connection_owner=owner.clone(); let stopped=cancel.clone();
+                    let connection_owner=owner.clone(); let stopped=cancel.clone(); let flush=flush.clone();
                     streams.spawn(async move {
                         let admission=tokio::select! {
                             _=stopped.cancelled()=>return,
@@ -277,7 +288,7 @@ async fn run(socket: WebSocket, state: State, session: Session, owner: String) {
                         s.metrics.streams.fetch_add(1,Ordering::Relaxed);
                         tokio::select! {
                             _=stopped.cancelled()=>{},
-                            _=forward(packet,stream,s.clone(),context,connection_owner,stopped.clone())=>{},
+                            _=forward(packet,stream,s.clone(),context,connection_owner,stopped.clone(),flush)=>{},
                         }
                         s.metrics.streams.fetch_sub(1,Ordering::Relaxed);
                     });
@@ -367,10 +378,7 @@ async fn resolve(packet: &ConnectPacket, state: &State) -> Result<IpAddr> {
     {
         bail!("host blocked");
     }
-    let addresses: Vec<IpAddr> = tokio::net::lookup_host((host.as_str(), packet.port))
-        .await?
-        .map(|x| x.ip())
-        .collect();
+    let addresses = state.resolver.lookup(&host).await?;
     if addresses.is_empty()
         || addresses
             .iter()
@@ -401,8 +409,16 @@ async fn connect(
     session: &Session,
 ) -> Result<TcpStream> {
     let user = state.cfg.username(&session.country, &session.sid)?;
-    let mut socket =
-        TcpStream::connect((state.cfg.upstream_host.as_str(), state.cfg.upstream_port)).await?;
+    // This hostname is shared by every destination stream. Resolving it again
+    // inside TcpStream::connect would still flood DNS despite destination caching.
+    let upstream: Vec<_> = state
+        .resolver
+        .lookup(&state.cfg.upstream_host)
+        .await?
+        .into_iter()
+        .map(|ip| SocketAddr::new(ip, state.cfg.upstream_port))
+        .collect();
+    let mut socket = TcpStream::connect(upstream.as_slice()).await?;
     socket.set_nodelay(true)?;
     // RFC 1928 + RFC 1929. All destination connections are opened through this authenticated tunnel.
     socket.write_all(&[5, 1, 2]).await?;
@@ -441,7 +457,11 @@ async fn connect(
         if reply[0] == 5 && matches!(reply[1], 1 | 3 | 4 | 5 | 6) {
             return Err(UpstreamUnavailable.into());
         }
-        bail!("upstream destination unavailable");
+        bail!(
+            "upstream destination unavailable (version {}, reply {})",
+            reply[0],
+            reply[1]
+        );
     }
     let count = match reply[3] {
         1 => 4,
@@ -460,6 +480,7 @@ async fn forward(
     s: Session,
     owner: String,
     cancel: CancellationToken,
+    flush: Arc<Notify>,
 ) {
     let closer = stream.get_close_handle();
     // DNS/policy failures are destination failures, never grounds for SID rotation.
@@ -470,7 +491,8 @@ async fn forward(
     .await
     {
         Ok(Ok(ip)) => ip,
-        _ => {
+        failure => {
+            tracing::debug!(?failure, "Destination lookup or policy rejected stream");
             state.metrics.rejected.fetch_add(1, Ordering::Relaxed);
             let _ = timeout(
                 Duration::from_secs(1),
@@ -488,6 +510,7 @@ async fn forward(
     let tcp = match connection {
         Ok(Ok(tcp)) => tcp,
         failure => {
+            tracing::debug!(?failure, "Upstream connection failed before forwarding");
             let transient = match failure {
                 Err(_) => true,
                 Ok(Err(error)) => error.is::<std::io::Error>() || error.is::<UpstreamUnavailable>(),
@@ -523,6 +546,7 @@ async fn forward(
             &s,
             &owner,
             true,
+            Some(&flush),
             last.clone(),
             cancel.clone(),
         ));
@@ -534,6 +558,7 @@ async fn forward(
             &s,
             &owner,
             false,
+            None,
             last.clone(),
             cancel.clone(),
         ));
@@ -547,7 +572,11 @@ async fn forward(
             }
         }
     };
-    tokio::select! { _=up=>{},_=down=>{},_=idle=>{} }
+    tokio::select! {
+        result=up=>{tracing::debug!(direction="upload", error=?result.err(), "Destination forwarding ended");},
+        result=down=>{tracing::debug!(direction="download", error=?result.err(), "Destination forwarding ended");},
+        _=idle=>{tracing::debug!("Destination stream idle timeout");}
+    }
     let _ = timeout(Duration::from_secs(1), closer.close(CloseReason::Voluntary)).await;
 }
 #[allow(clippy::too_many_arguments)]
@@ -558,6 +587,7 @@ async fn copy_charged<R: AsyncRead + Unpin + Send, W: AsyncWrite + Unpin + Send>
     s: &Session,
     owner: &str,
     up: bool,
+    flush: Option<&Notify>,
     last: Arc<std::sync::atomic::AtomicU64>,
     cancel: CancellationToken,
 ) -> Result<()> {
@@ -566,6 +596,9 @@ async fn copy_charged<R: AsyncRead + Unpin + Send, W: AsyncWrite + Unpin + Send>
         let n = reader.read(&mut buf).await?;
         if n == 0 {
             return Ok(());
+        }
+        if let Some(flush) = flush {
+            flush.notify_one();
         }
         let allowed = match state.store.charge(s, owner, n).await {
             Ok(n) => n,

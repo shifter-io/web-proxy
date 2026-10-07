@@ -66,6 +66,8 @@ fn public_path(kind: Kind, path: &str) -> Option<&str> {
             file,
             "index.html"
                 | "runtime.js"
+                | "runtime-data.js"
+                | "public-suffix-list.dat"
                 | "bridge.js"
                 | "sw.js"
                 | "transport-compat.js"
@@ -77,7 +79,7 @@ fn public_path(kind: Kind, path: &str) -> Option<&str> {
                 | "vendor/baremux/index.js"
                 | "vendor/baremux/index.mjs"
                 | "vendor/baremux/worker.js"
-                | "vendor/epoxy/index.mjs"
+                | "vendor/libcurl/index.mjs"
         ),
         Kind::Sdk => {
             file == "v1/shifter-web-proxy.js"
