@@ -179,7 +179,7 @@ node scripts/build-sdk.mjs
 python3 scripts/render-readme.py
 ```
 
-SDK 1.0.4 detects an unresponsive browsing runtime and attempts bounded recovery within the existing session. The gateway queues short connection bursts, with updated portable defaults for heavy pages. Existing deployment overrides must be updated separately; the original YouTube renderer-crash cause remains unconfirmed.
+SDK 1.0.4 detects an unresponsive browsing runtime and attempts bounded recovery within the existing session. The current runtime uses libcurl transport, bundles its domain suffix data, and retries an interrupted successful script or stylesheet response once. Proxied pages use their normal rendering fallback instead of native View Transitions to avoid a reproduced Chrome compositor crash. The gateway queues short connection bursts and flushes upload flow-control credits. Existing deployment overrides must be updated separately.
 
 The [engineering guide](docs/engineering.html) covers architecture, API contracts, session limits, isolation, and troubleshooting. See [testing and validation](docs/engineering.html#testing-and-validation) for container integration checks and bounded live smoke tests.
 

@@ -52,7 +52,7 @@
           frame?.frame.remove();
           frame = null;
           const websocket = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/wisp/${encodeURIComponent(ticket)}/`;
-          await connection.setTransport('/vendor/epoxy/index.mjs',[{wisp:websocket, wisp_v2:false}]);
+          await connection.setTransport('/vendor/libcurl/index.mjs',[{websocket}]);
           if (version !== commandVersion) return;
           frame = scramjet.createFrame();
           frame.frame.setAttribute('sandbox','allow-scripts allow-same-origin allow-forms allow-downloads');

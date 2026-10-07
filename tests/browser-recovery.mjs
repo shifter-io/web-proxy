@@ -52,6 +52,10 @@ try {
   // Cold-profile cross-origin modules must not depend on that network fetch.
   await destination().waitForFunction(()=>window.crossOriginModuleLoaded===true);
   await destination().waitForFunction(()=>window.incompleteScriptRecovered===true);
+  assert.equal(await destination().evaluate(()=>window.transitionFallback),true);
+  assert.equal(await page.evaluate(()=>typeof document.startViewTransition),'function');
+  assert.equal(await runtime().evaluate(()=>typeof document.startViewTransition),'function');
+  results.push('Destination scripts select the View Transition fallback before running; host and runtime retain the native API');
   results.push('An interrupted 200 script body is fetched again once and executes without restarting the session');
   results.push('Cross-origin modules load with a cold profile and no external Public Suffix List service');
   const upload=await destination().evaluate(async()=>{

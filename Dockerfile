@@ -4,6 +4,7 @@ WORKDIR /build
 COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts --omit=dev
 COPY scripts/vendor.mjs scripts/vendor.mjs
+COPY scripts/compat scripts/compat
 COPY web web
 RUN node scripts/vendor.mjs
 

@@ -2,7 +2,7 @@
 import asyncio, hashlib, json, re
 from urllib.parse import urlsplit, parse_qs
 
-PAGE = '''<!doctype html><html><head><title>Shifter fixture</title></head><body style="font:18px system-ui;padding:32px;background:#f3f8eb;color:#234">
+PAGE = '''<!doctype html><html><head><script>window.transitionFallback = !('startViewTransition' in document) && !('startViewTransition' in document.documentElement);</script><title>Shifter fixture</title></head><body style="font:18px system-ui;padding:32px;background:#f3f8eb;color:#234">
 <h1>Proxy test destination</h1><p id="identity">COUNTRY / SID</p>
 <nav><a href="/next">Next page</a> · <a href="/redirect">Redirect</a> · <a href="http://second.test/">Second origin</a> · <a href="/logout">Log out</a></nav>
 <p id="result">JavaScript request pending</p><form action="/login" method="post"><label>Synthetic username <input name="username" value="alice"></label><button>Sign in</button></form>
