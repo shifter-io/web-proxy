@@ -17,13 +17,30 @@
     const { ScramjetController } = $scramjetLoadController();
     const scramjet = new ScramjetController({flags:{syncxhr:false},prefix:'/service/',files:{wasm:'/vendor/scram/scramjet.wasm.wasm',all:'/vendor/scram/scramjet.all.js',sync:'/vendor/scram/scramjet.sync.js'}});
     await scramjet.init();
-    await navigator.serviceWorker.register('/sw.js');
+    // A crashed renderer can leave the old worker's engine/transport state
+    // unusable. Install a fresh worker for this outer frame, retaining its DB
+    // and cookie jar. Waiting for ready alone can return the previous worker.
+    const workerUrl = '/sw.js?' + bridge.query;
+    await navigator.serviceWorker.register(workerUrl, {scope:'/'});
     await navigator.serviceWorker.ready;
-    if (!navigator.serviceWorker.controller) await new Promise(resolve => navigator.serviceWorker.addEventListener('controllerchange',resolve,{once:true}));
+    const controlled = () => navigator.serviceWorker.controller?.scriptURL.endsWith(workerUrl);
+    if (!controlled()) await new Promise(resolve => {
+      const changed = () => {
+        if (!controlled()) return;
+        navigator.serviceWorker.removeEventListener('controllerchange', changed);
+        resolve();
+      };
+      navigator.serviceWorker.addEventListener('controllerchange', changed);
+      changed();
+    });
     connection = new BareMux.BareMuxConnection('/vendor/baremux/worker.js');
     window.addEventListener('message', async event => {
       if (!bridge.accepts(event)) return;
       const {command,ticket,url} = event.data;
+      if (command === 'ping') {
+        if (event.data.engineId === engineId) send('pong', {probe:event.data.probe});
+        return;
+      }
       const version = ['clear','start','reconnect'].includes(command) ? ++commandVersion : commandVersion;
       try {
         if (command === 'clear') { frame?.frame.remove(); frame = null; location.replace('/reset.html?' + bridge.query + '#stop'); return; }
@@ -64,6 +81,11 @@
             const destinationWindow = currentFrame.frame.contentWindow;
             try { if (destinationWindow.location.href === 'about:blank') return; } catch {}
             const document = currentFrame.frame.contentDocument;
+            if (!document) {
+              // Browser-generated errors are not usable destination documents.
+              send('error', {message:'The website could not load. Select Reload to try again.'});
+              return;
+            }
             const id = document?.getElementById('shifter-connection-failure')?.dataset.id;
             if (id) {
               currentFrame.frame.style.visibility = 'hidden';
@@ -94,6 +116,6 @@
         else if (frame && ['back','forward','reload'].includes(command)) frame[command]();
       } catch (error) { if (version !== commandVersion) return; console.error('Runtime start failed:','Transport initialization error'); send('error',{message:'The connection could not be established. Stop browsing and try again; your remaining allowance is preserved.'}); }
     });
-    send('ready');
+    send('ready', {heartbeat:true});
   } catch { send('error',{message:'The browser runtime could not initialize. Use a browser with service worker and WebAssembly support.'}); }
 })();

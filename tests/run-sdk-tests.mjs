@@ -50,7 +50,9 @@ try {
   await command('node',['tests/sdk-integration.mjs']);
   await command('node',['tests/public-files.mjs']);
   await command('node',['tests/integration.mjs']);
+  await command('node',['tests/limits.mjs']);
   await command('node',['tests/configuration.mjs']);
+  if(process.argv.includes('--browser')) await command('node',['tests/browser-recovery.mjs']);
   success=true;
   if(process.argv.includes('--keep')) {
     await writeFile(path.join(root,'artifacts/sdk-test-context.json'),JSON.stringify({project,dir,composeFile:env.COMPOSE_FILE}));

@@ -179,6 +179,8 @@ node scripts/build-sdk.mjs
 python3 scripts/render-readme.py
 ```
 
+SDK 1.0.4 detects an unresponsive browsing runtime and attempts bounded recovery within the existing session. The gateway queues short connection bursts, with updated portable defaults for heavy pages. Existing deployment overrides must be updated separately; the original YouTube renderer-crash cause remains unconfirmed.
+
 The [engineering guide](docs/engineering.html) covers architecture, API contracts, session limits, isolation, and troubleshooting. See [testing and validation](docs/engineering.html#testing-and-validation) for container integration checks and bounded live smoke tests.
 
 | Directory | Contents |

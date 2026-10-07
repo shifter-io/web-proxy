@@ -43,6 +43,7 @@ test('runtime reports document loads, ignores anchors/cancelled navigation and r
       super();
       this.frame = new EventTarget();
       this.frame.style = {};
+      this.frame.contentDocument = {getElementById:() => null};
       this.frame.setAttribute = () => {};
       this.frame.remove = () => {};
       this.frame.contentWindow = new EventTarget();
@@ -59,7 +60,7 @@ test('runtime reports document loads, ignores anchors/cancelled navigation and r
     createRuntimeBridge:async () => ({query:'bound', send:(type,data={})=>messages.push({type,...data}), accepts:event=>event.origin==='http://control.test' && event.source===parent && event.data?.source==='shifter-control'}),
     parent, window, URL, queueMicrotask, console,
     location:{protocol:'http:',host:'runtime.test',replace:() => {}},
-    navigator:{serviceWorker:{register:async () => {},ready:Promise.resolve(),controller:{}}},
+    navigator:{serviceWorker:{register:async () => {},ready:Promise.resolve(),controller:{scriptURL:'http://runtime.test/sw.js?bound'}}},
     $scramjetLoadController:() => ({ScramjetController:Controller}),
     BareMux:{BareMuxConnection:class {async setTransport() {}}},
     document:{getElementById:() => null,body:{appendChild:frame => assert.notEqual(frame.contentWindow.location.href,'about:blank')}},

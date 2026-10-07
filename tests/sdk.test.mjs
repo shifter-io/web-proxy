@@ -6,6 +6,98 @@ import {readFile} from 'node:fs/promises';
 import {runInNewContext} from 'node:vm';
 
 const flush = async () => { for(let i=0;i<12;i++) await Promise.resolve(); };
+
+async function watchedRuntime(t) {
+  t.mock.timers.enable({apis:['setTimeout','setInterval','Date'],now:Date.now()});
+  const e=environment(t);await e.start();
+  Object.defineProperty(document,'visibilityState',{configurable:true,value:'visible'});
+  e.sent=[];
+  e.ready=async()=>{
+    document.querySelector('#view iframe').contentWindow.postMessage=data=>e.sent.push(data);
+    e.runtimeMessage('ready',{heartbeat:true});await flush();
+  };
+  e.advance=async ms=>{t.mock.timers.tick(ms);await flush();};
+  e.silence=async()=>{for(let i=0;i<4;i++)await e.advance(5000);};
+  await e.ready();return e;
+}
+
+test('dead runtime is replaced without CAPTCHA, storage reset or allowance renewal',async t=>{
+  const e=await watchedRuntime(t),before=e.proxy.getState().session;
+  const old=document.querySelector('#view iframe'),engine=e.sent.at(-1).engineId;
+  e.runtimeMessage('loaded',{engineId:engine});
+  await e.silence();assert.equal(e.proxy.getState().status,'connecting');
+  e.runtimeMessage('loaded',{engineId:engine});assert.equal(e.proxy.getState().status,'connecting');
+  await e.advance(300);await e.advance(6500);
+  const replacement=document.querySelector('#view iframe');
+  assert.notEqual(replacement,old);assert.equal(new URL(replacement.src).pathname,'/index.html');
+  assert.notEqual(new URL(old.src).searchParams.get('channel'),new URL(replacement.src).searchParams.get('channel'));
+  await e.ready();e.runtimeMessage('loaded',{engineId:e.sent.at(-1).engineId});
+  assert.equal(e.proxy.getState().status,'browsing');
+  assert.equal(e.requests.filter(r=>r.url.endsWith('/sessions')).length,1);
+  assert.equal(e.requests.filter(r=>r.url.endsWith('/tickets')).length,2);
+  assert.equal(e.proxy.getState().session.expiresAt,before.expiresAt);
+  assert.equal(e.proxy.getState().session.remainingBytes,before.remainingBytes);
+  assert.equal(JSON.parse(e.requests.find(r=>r.url.endsWith('/recover')).options.body).reason,'websocket');
+});
+
+test('watchdog accepts only the current probe and engine, and responsive runtimes stay mounted',async t=>{
+  const e=await watchedRuntime(t),frame=document.querySelector('#view iframe');
+  for(let i=0;i<5;i++) {
+    await e.advance(5000);const ping=e.sent.at(-1);assert.equal(ping.command,'ping');
+    e.runtimeMessage('pong',{probe:ping.probe,engineId:ping.engineId});
+  }
+  assert.equal(document.querySelector('#view iframe'),frame);
+  assert.ok(!e.requests.some(r=>r.url.endsWith('/recover')));
+  await e.advance(5000);const ping=e.sent.at(-1);
+  e.runtimeMessage('pong',{probe:'stale',engineId:ping.engineId});
+  e.runtimeMessage('pong',{probe:ping.probe,engineId:'stale'});
+  for(let i=0;i<3;i++)await e.advance(5000);
+  await e.advance(300);assert.equal(e.requests.filter(r=>r.url.endsWith('/recover')).length,1);
+});
+
+test('hidden tabs and a suspended host get fresh probes instead of false crash recovery',async t=>{
+  const e=await watchedRuntime(t);
+  await e.advance(5000);
+  Object.defineProperty(document,'visibilityState',{configurable:true,value:'hidden'});
+  document.dispatchEvent(new window.Event('visibilitychange'));
+  await e.advance(60000);
+  Object.defineProperty(document,'visibilityState',{configurable:true,value:'visible'});
+  document.dispatchEvent(new window.Event('visibilitychange'));
+  await e.advance(5000);
+  await e.advance(60000);
+  assert.ok(!e.requests.some(r=>r.url.endsWith('/recover')));
+  await e.advance(5000);const ping=e.sent.at(-1);
+  e.runtimeMessage('pong',{probe:ping.probe,engineId:ping.engineId});
+  assert.equal(e.proxy.getState().active,true);
+});
+
+test('Stop cancels dead-runtime replacement during lease retirement',async t=>{
+  const e=await watchedRuntime(t);await e.silence();await e.advance(300);
+  const stop=e.proxy.stop();await flush();e.runtimeMessage('cleared');await stop;
+  await e.advance(10000);
+  assert.equal(document.querySelector('iframe'),null);
+  assert.equal(e.requests.filter(r=>r.url.endsWith('/tickets')).length,1);
+});
+
+test('navigation during crash recovery replaces the dead frame at the requested URL',async t=>{
+  const e=await watchedRuntime(t);await e.silence();await e.advance(300);
+  const navigate=e.proxy.navigate('example.org');await flush();await e.advance(6500);await navigate;
+  await e.ready();
+  assert.equal(e.sent.at(-1).command,'start');assert.equal(e.sent.at(-1).url,'https://example.org/');
+});
+
+test('unresponsive replacements stop after two automatic recoveries; Reload remains available',async t=>{
+  const e=await watchedRuntime(t);
+  for(let i=1;i<=2;i++) {
+    await e.silence();await e.advance(i*300);await e.advance(6500);await e.ready();
+  }
+  await e.silence();await e.advance(1000);
+  assert.equal(e.proxy.getState().status,'interrupted');
+  assert.equal(e.requests.filter(r=>r.url.endsWith('/recover')).length,2);
+  const frame=document.querySelector('#view iframe'),reload=e.proxy.reload();
+  await flush();await e.advance(6500);await reload;
+  assert.notEqual(document.querySelector('#view iframe'),frame);
+});
 function environment(t) {
   const dom = new JSDOM('<button id="search">Search</button><div id="view"></div>', {url:'https://example.com'});
   const originals = {};
@@ -270,6 +362,18 @@ test('server authorization/quota/storage refusal never loops or exposes technica
   e.fail();await e.advance(300);await e.advance(10000);
   assert.equal(e.sent.filter(d=>d.command==='reconnect').length,0);
   assert.equal(e.proxy.getState().status,'interrupted');assert.equal(e.proxy.getState().error,null);
+});
+
+test('navigation after refused recovery revokes the old lease before requesting a ticket',async t=>{
+  const e=await recoveryEnvironment(t),originalFetch=globalThis.fetch;
+  t.mock.method(globalThis,'fetch',async(url,options)=>url.endsWith('/recover')?{ok:false,status:409,json:async()=>({code:'RECOVERY_UNAVAILABLE'})}:originalFetch(url,options));
+  e.fail();await e.advance(300);assert.equal(e.proxy.getState().status,'interrupted');
+  const navigate=e.proxy.navigate('example.org');await flush();
+  assert.ok(e.requests.some(r=>r.url.endsWith('/reconnect')));
+  assert.equal(e.requests.filter(r=>r.url.endsWith('/tickets')).length,1);
+  await e.advance(6500);await navigate;
+  assert.equal(e.sent.at(-1).url,'https://example.org/');
+  assert.equal(e.requests.filter(r=>r.url.endsWith('/tickets')).length,2);
 });
 
 test('Stop during the retired-lease wait cancels the pending replacement ticket',async t=>{

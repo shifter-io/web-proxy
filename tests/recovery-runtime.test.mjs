@@ -14,8 +14,8 @@ async function runtime(t) {
     go(url){this.url=url;this.dispatchEvent(Object.assign(new window.Event('navigate'),{url}));this.frame.src='https://runtime.test/service/'+encodeURIComponent(url);}
   }
   const controller={postMessage:(data,ports)=>{lookups.push({data,reply:value=>ports[0].postMessage(value)});}};
-  const bridge={send:(type,data)=>sent.push({type,...data}),accepts:()=>true};
-  await runInNewContext(source,{createRuntimeBridge:async()=>bridge,document:window.document,window,location:window.location,navigator:{serviceWorker:{register:async()=>{},ready:Promise.resolve(),controller}},$scramjetLoadController:()=>({ScramjetController:class {async init(){}createFrame(){return new Frame();}}}),BareMux:{BareMuxConnection:class {async setTransport(){}}},URL,MessageChannel,setTimeout,clearTimeout,queueMicrotask,console});
+  const bridge={query:'channel=fixture-generation',send:(type,data)=>sent.push({type,...data}),accepts:()=>true};
+  await runInNewContext(source,{createRuntimeBridge:async()=>bridge,document:window.document,window,location:window.location,navigator:{serviceWorker:{register:async(url,options)=>{assert.equal(options.scope,'/');assert.equal(url,'/sw.js?'+bridge.query);controller.scriptURL='https://runtime.test'+url;},ready:Promise.resolve(),controller}},$scramjetLoadController:()=>({ScramjetController:class {async init(){}createFrame(){return new Frame();}}}),BareMux:{BareMuxConnection:class {async setTransport(){}}},URL,MessageChannel,setTimeout,clearTimeout,queueMicrotask,console});
   t.after(()=>window.close());
   async function command(command,data={}){window.dispatchEvent(new window.MessageEvent('message',{data:{command,...data}}));await flush();}
   async function load(marker){
@@ -49,4 +49,24 @@ test('worker response from a replaced runtime cannot fail the new navigation',as
   for(const lookup of r.lookups)lookup.reply({reason:'upstream',method:'GET',url:'https://example.com/'});
   await r.load();await r.waitFor(()=>r.sent.some(m=>m.type==='loaded'));
   assert.ok(!r.sent.some(m=>m.type==='proxy-failure'));assert.equal(r.sent.find(m=>m.type==='loaded').engineId,'second');
+});
+
+test('runtime echoes authenticated probes only for the active engine',async t=>{
+  const r=await runtime(t);
+  assert.equal(r.sent.find(m=>m.type==='ready').heartbeat,true);
+  await r.command('start',{ticket:'fixture-ticket',url:'https://example.com/',engineId:'current'});
+  await r.command('ping',{engineId:'stale',probe:'old'});
+  assert.ok(!r.sent.some(m=>m.type==='pong'));
+  await r.command('ping',{engineId:'current',probe:'fresh'});
+  assert.equal(r.sent.at(-1).type,'pong');assert.equal(r.sent.at(-1).probe,'fresh');
+  assert.equal(r.sent.at(-1).engineId,'current');
+});
+
+test('browser error document cannot be reported as successfully loaded',async t=>{
+  const r=await runtime(t);
+  await r.command('start',{ticket:'fixture-ticket',url:'https://example.com/',engineId:'current'});
+  const frame=r.frames[0].frame;
+  Object.defineProperty(frame,'contentDocument',{value:null});
+  frame.dispatchEvent(new frame.ownerDocument.defaultView.Event('load'));await flush();
+  assert.ok(r.sent.some(m=>m.type==='error'));assert.ok(!r.sent.some(m=>m.type==='loaded'));
 });

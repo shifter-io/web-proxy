@@ -2,6 +2,13 @@ importScripts('/vendor/scram/scramjet.all.js', '/transport-compat.js');
 const { ScramjetServiceWorker } = $scramjetLoadWorker();
 const scramjet = new ScramjetServiceWorker();
 installRequestBodyCompatibility(scramjet.client);
+// Scramjet v1 persists its cookie jar as an object, but CookieStore.load only
+// restores strings (its object branch returns without assigning the jar).
+// Normalize before the constructor's asynchronous IndexedDB restore finishes.
+if (scramjet.cookieStore?.load) {
+  const load = scramjet.cookieStore.load.bind(scramjet.cookieStore);
+  scramjet.cookieStore.load = value => load(typeof value === 'string' ? value : JSON.stringify(value));
+}
 // Failure capabilities stay in the worker. A destination cannot trigger recovery
 // by displaying an error-looking page or fabricating a postMessage.
 const failures = new Map();
@@ -19,7 +26,9 @@ function unavailable(failure) {
   const id = crypto.randomUUID();
   failures.set(id, {until:Date.now()+60000, failure});
   return new Response(`<!doctype html><html><head><meta name="robots" content="noindex"><meta charset="utf-8"><title>Connecting</title></head><body style="background:#080b13;color:#aab3c2;font:16px system-ui"><p id="shifter-connection-failure" data-id="${id}">Connecting to the website…</p></body></html>`, {
-    status:503, headers:{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store', 'Content-Security-Policy':"default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'self'"},
+    // The enclosing runtime enforces the configured ancestor allowlist. This
+    // inert child document must also work beneath that cross-origin embedder.
+    status:503, headers:{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store', 'Content-Security-Policy':"default-src 'none'; style-src 'unsafe-inline'"},
   });
 }
 self.addEventListener('install', () => self.skipWaiting());
