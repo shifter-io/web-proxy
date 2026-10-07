@@ -40,10 +40,23 @@ async def handle(reader, writer):
         length=int(headers.get('content-length','0'))
         if length>65536: return
         body=await reader.readexactly(length) if length else b''
+        if headers.get('transfer-encoding')=='chunked':
+            chunks=[]; total=0
+            while True:
+                size=int((await reader.readuntil(b'\r\n')).split(b';',1)[0].strip(),16)
+                if not size:
+                    await reader.readexactly(2); break
+                total+=size
+                if total>65536: return
+                chunks.append(await reader.readexactly(size))
+                if await reader.readexactly(2)!=b'\r\n': return
+            body=b''.join(chunks)
         uri=urlsplit(path); extra=''; code='200 OK'; content_type='text/html; charset=utf-8'
         identity={'country':country,'sid':sid,'ip':'198.51.100.'+str(int(hashlib.sha256(sid.encode()).hexdigest()[:2],16)), 'host':headers.get('host','')}
         if uri.path in ['/api','/ip']:
             payload=json.dumps(identity).encode();content_type='application/json'
+        elif uri.path=='/echo' and method=='POST':
+            payload=body;content_type='application/octet-stream'
         elif uri.path=='/cross-origin.js':
             payload=b'window.crossOriginModuleLoaded = true;';content_type='application/javascript'
             extra='Access-Control-Allow-Origin: *\r\n'

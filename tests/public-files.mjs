@@ -51,7 +51,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   for (const path of ['/','/minimal.html','/app.js','/style.css','/assets/flags/us.svg']) {
     assert.equal((await request(control,path)).status,200,`Control asset: ${path}`);
   }
-  for (const path of ['/','/reset.html','/reset.js','/bridge.js','/runtime.js','/runtime-data.js','/public-suffix-list.dat','/sw.js','/transport-compat.js','/vendor/scram/scramjet.all.js','/vendor/scram/scramjet.sync.js','/vendor/scram/scramjet.wasm.wasm','/vendor/baremux/index.js','/vendor/baremux/worker.js','/vendor/epoxy/index.mjs']) {
+  for (const path of ['/','/reset.html','/reset.js','/bridge.js','/runtime.js','/runtime-data.js','/wisp-transport.mjs','/public-suffix-list.dat','/sw.js','/transport-compat.js','/vendor/scram/scramjet.all.js','/vendor/scram/scramjet.sync.js','/vendor/scram/scramjet.wasm.wasm','/vendor/baremux/index.js','/vendor/baremux/worker.js','/vendor/epoxy/index.mjs']) {
     assert.equal((await request(runtime,path)).status,200,`Runtime asset: ${path}`);
   }
   console.log(`PASS public-file boundary: ${privatePaths.length*4} raw GET/HEAD denial probes; SDK, control, and runtime assets remain available`);

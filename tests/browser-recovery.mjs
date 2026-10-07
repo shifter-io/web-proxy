@@ -54,6 +54,14 @@ try {
   await destination().waitForFunction(()=>window.incompleteScriptRecovered===true);
   results.push('An interrupted 200 script body is fetched again once and executes without restarting the session');
   results.push('Cross-origin modules load with a cold profile and no external Public Suffix List service');
+  const upload=await destination().evaluate(async()=>{
+    const sent=Uint8Array.from({length:65536},(_,i)=>(i*37)%256);
+    const response=await fetch('/echo',{method:'POST',body:sent});
+    const received=new Uint8Array(await response.arrayBuffer());
+    return {status:response.status,length:received.length,mismatch:received.findIndex((byte,i)=>byte!==sent[i])};
+  });
+  assert.deepEqual({status:upload.status,length:upload.length,mismatch:upload.mismatch},{status:200,length:65536,mismatch:-1},JSON.stringify(upload));
+  results.push('A 64 KiB binary POST crosses the four-packet Wisp window without losing or duplicating bytes');
   const identity=await destination().$eval('#identity',node=>node.textContent);
   const before=await page.evaluate(()=>testProxy.getState().session);
   await destination().evaluate(()=>{document.cookie='recovery_marker=preserved; Path=/';});
