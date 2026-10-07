@@ -4,7 +4,7 @@ A web proxy that combines **Scramjet in the browser**, **HAProxy (local TCP or H
 
 Visitors enter a website, choose an exit country, and browse inside the page without configuring their browser’s proxy settings. Each visitor receives a server-generated sticky session ID. The gateway adds the upstream credentials and country targeting on the server.
 
-**Status: shared browser SDK and server-verified reCAPTCHA v2 implemented.** The hosted entry point is `/sdk/v1/shifter-web-proxy.js`, exposing `ShifterWebProxy.create()`. Production API access uses origin-bound anonymous bearer credentials; the legacy cookie API exists only in synthetic test mode. Production activation still requires real CAPTCHA credentials and final acceptance on both websites. This does not establish a unique-person identity or universal destination compatibility.
+**Status: shared browser SDK and server-verified reCAPTCHA v2 implemented.** The hosted entry point is `/sdk/v1/shifter-web-proxy.js`, exposing `ShifterWebProxy.create()`. Production API access uses site-bound anonymous bearer credentials; the legacy cookie API exists only in synthetic test mode. Production activation still requires real CAPTCHA credentials and final acceptance on both websites. This does not establish a unique-person identity or universal destination compatibility.
 
 An offline HTML version of this README is included at [docs/readme.html](docs/readme.html).
 
@@ -109,7 +109,7 @@ The runtime routes Scramjet v1's injected WASM script through the engine's JavaS
 
 ### CAPTCHA configuration
 
-Register both website domains on the existing standard v2 checkbox key. The **site key is public**, including in GitHub. The **secret is private** and must never enter SDK code, HTML, URLs, repository files, or logs. Set `RECAPTCHA_SITE_KEY` and mount `RECAPTCHA_SECRET_FILE` only in the API container. The API needs outbound HTTPS to Google's fixed SiteVerify endpoint. Google responses must be successful, free of error codes, and match the exact caller hostname. Google enforces the response token's two-minute lifetime; the returned challenge timestamp is validated as a load timestamp, not mistaken for when the user solved it. A SHA-256 token reservation in Redis rejects concurrent replay; raw CAPTCHA responses are not stored. See [Google verification](https://developers.google.com/recaptcha/docs/verify).
+Register both production website domains and the explicitly enabled staging hostname `staging.example.com` on the existing standard v2 checkbox key. The **site key is public**, including in GitHub. The **secret is private** and must never enter SDK code, HTML, URLs, repository files, or logs. Set `RECAPTCHA_SITE_KEY` and mount `RECAPTCHA_SECRET_FILE` only in the API container. The API needs outbound HTTPS to Google's fixed SiteVerify endpoint. Google responses must be successful, free of error codes, and match the exact caller hostname. Google enforces the response token's two-minute lifetime; the returned challenge timestamp is validated as a load timestamp, not mistaken for when the user solved it. A SHA-256 token reservation in Redis rejects concurrent replay; raw CAPTCHA responses are not stored. See [Google verification](https://developers.google.com/recaptcha/docs/verify).
 
 For local real-CAPTCHA development, add `compose.captcha.example.yaml` as an overlay, set the public key and local secret-file path in ignored configuration, and register localhost on a development key. The overlay mounts the secret only in the API. Synthetic browser tests instead use the disposable test stack; Google test tokens are not automatically accepted by its Redis-backed mock verifier.
 
@@ -289,7 +289,7 @@ mkdir -p .secrets/https .secrets/redis-tls
 Edit the ignored `.env.production` generated from `deploy/production.example.env`:
 
 - `RUNTIME_HOST=proxy.example.net` is the public gateway hostname. Point its DNS record at the ingress host. Only HAProxy publishes ports 80 and 443. The API and gateway listeners stay on the internal ingress network; gateways have a separate outbound network for Shifter.
-- `INTEGRATIONS` maps exact HTTPS origins to unique stable website IDs. The portable defaults allow only `https://example.com` (`shifter`) and `https://second.example.com` (`ip-info`). Set the same mapping in API and gateways. Website IDs namespace quotas; do not rename them during an ordinary release.
+- `INTEGRATIONS` maps exact HTTPS origins to stable website IDs. The production environment example keeps `https://example.com` (`shifter`) and `https://second.example.com` (`ip-info`) and adds `https://staging.example.com` (`shifter`) for staging. Origins must be unique; explicitly configured aliases may share a site ID and its bearer-identity/quota namespace. Browser storage remains separate per origin, and CAPTCHA verification still checks the exact requesting hostname. Set the same mapping in API and gateways. Website IDs namespace quotas; do not rename them during an ordinary release. The built-in fallback still allows only the two production origins; staging requires this explicit setting. No implicit `www`, other subdomains, or localhost are added.
 - Set `TLS_CERT_DIR` to a directory containing one or more `.pem` files, each with the full certificate chain followed by its private key. The certificate must cover `proxy.example.net` (or the configured `RUNTIME_HOST`). Provision certificates through your existing certificate manager or ACME DNS challenge workflow. The example does not issue or renew certificates automatically. Mount only the needed server PEM files, not an entire CA/ACME account directory.
 - Set `REDIS_NETWORK` to the existing Redis Docker network. It must be an internal bridge with IPv4/IPv6 gateway mode `isolated`, no Redis published ports, and only Redis/API/gateways as members. HAProxy never joins it. For Redis on separate private infrastructure, adapt the application state-network attachment and firewall policy to that deployment; the supplied Compose topology assumes a shared Docker network.
 - Set `REDIS_URL_SECRET_FILE` to an ignored file containing `redis://USER:URL_ENCODED_PASSWORD@PRIVATE_REDIS_HOST:6379/0` for the current private-network/password deployment. The hostname must resolve only to private addresses. Use a dedicated named ACL user, with unauthenticated default access disabled. No Redis TLS is required for this explicitly requested phase. Optional `rediss://` is also supported, with certificate and hostname verification.
@@ -314,7 +314,7 @@ Certificate renewal: have your certificate manager atomically replace the fullch
 docker compose --env-file .env.production -f compose.production.yaml up -d --no-deps --force-recreate haproxy
 ```
 
-Recreating HAProxy interrupts active Wisp connections. Schedule renewal deployment accordingly. Production requires server-verified CAPTCHA and origin-bound credentials; only synthetic test mode enables the legacy cookie API.
+Recreating HAProxy interrupts active Wisp connections. Schedule renewal deployment accordingly. Production requires server-verified CAPTCHA and site-bound credentials; only synthetic test mode enables the legacy cookie API.
 
 Use the shared SDK integration above on either allowed website. The production ingress serves the library and runtime on `proxy.example.net`; `/api/v1/*` routes to the API service. The API has a separate outbound network for Google verification and remains attached to private Redis.
 
@@ -351,7 +351,7 @@ These advanced settings are set in the local Compose environment or supplied whe
 
 | Variable | Example/default | Meaning |
 | --- | --- | --- |
-| `APP_ENV` | `development`, `test`, or `production` | Production requires distinct HTTPS origins and private Redis with a named ACL user/password; optional Redis TLS is certificate-verified. The API requires real reCAPTCHA credentials; SDK identity is an origin-bound bearer credential. |
+| `APP_ENV` | `development`, `test`, or `production` | Production requires distinct HTTPS origins and private Redis with a named ACL user/password; optional Redis TLS is certificate-verified. The API requires real reCAPTCHA credentials; SDK identity is a site-bound bearer credential. |
 | `ROLE` | `api` or `gateway` | Binary role |
 | `REPLICA` | `api`, `gateway-a`, `gateway-b` | Operational identity for health/metrics |
 | `LISTEN` | `0.0.0.0:3000` | Listener inside the container |

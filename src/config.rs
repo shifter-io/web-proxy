@@ -117,11 +117,11 @@ pub fn integrations(value: &str, runtime: &str, production: bool) -> Result<Vec<
         bail!("INTEGRATIONS must not be empty");
     }
     let mut origins = std::collections::HashSet::new();
-    let mut sites = std::collections::HashSet::new();
     for entry in &entries {
         validate_origins(&entry.origin, runtime, production)?;
+        // Explicit origin aliases may share a site's identity/quota namespace.
+        // Origins themselves must stay unique so routing remains unambiguous.
         if !origins.insert(&entry.origin)
-            || !sites.insert(&entry.site)
             || entry.site.is_empty()
             || entry.site.len() > 64
             || !entry
@@ -129,7 +129,7 @@ pub fn integrations(value: &str, runtime: &str, production: bool) -> Result<Vec<
                 .bytes()
                 .all(|c| c.is_ascii_alphanumeric() || c == b'-')
         {
-            bail!("INTEGRATIONS requires unique origins and unique alphanumeric site IDs");
+            bail!("INTEGRATIONS requires unique origins and valid alphanumeric site IDs");
         }
     }
     Ok(entries)
@@ -394,6 +394,21 @@ fn private_ip(ip: IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_origin_aliases_can_share_a_site() {
+        let value = r#"[{"origin":"https://example.com","site":"shifter"},{"origin":"https://second.example.com","site":"ip-info"},{"origin":"https://staging.example.com","site":"shifter"}]"#;
+        let entries = integrations(value, "https://proxy.example.net", true).unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].site, entries[2].site);
+        assert_ne!(entries[0].site, entries[1].site);
+        for duplicate in [
+            r#"[{"origin":"https://example.com","site":"shifter"},{"origin":"https://example.com","site":"shifter"}]"#,
+            r#"[{"origin":"https://example.com","site":"shifter"},{"origin":"https://example.com","site":"other"}]"#,
+        ] {
+            assert!(integrations(duplicate, "https://proxy.example.net", true).is_err());
+        }
+    }
 
     #[test]
     fn integrations_and_captcha_are_strict() {

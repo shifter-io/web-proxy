@@ -5,6 +5,7 @@ import {docker} from './docker.mjs';
 import {Wisp, sleep} from './client.mjs';
 const base=process.env.CONTROL_ORIGIN || 'http://localhost:8180';
 const origins=['https://example.com','https://second.example.com'];
+const staging='https://staging.example.com';
 const hash=value=>createHash('sha256').update(value).digest('hex');
 const redis=(...args)=>docker(['compose','exec','-T','redis','redis-cli','-n','1','--raw',...args]).then(s=>s.trim());
 const check=await fetch(base+'/api/countries').then(r=>r.json());
@@ -19,6 +20,11 @@ async function api(path,{origin=origins[0],method='GET',body,credential,expected
   assert.equal(response.status,expected,`${method} ${path}: ${data.code || response.status}`);return data;
 }
 for(const origin of origins) assert.equal((await api('config',{origin})).countries.length,54);
+assert.equal((await api('config',{origin:staging})).site,'shifter');
+const stagingPreflight=await fetch(base+'/api/v1/session',{method:'OPTIONS',headers:{Origin:staging,'Access-Control-Request-Method':'GET','Access-Control-Request-Headers':'authorization'}});
+assert.equal(stagingPreflight.headers.get('access-control-allow-origin'),staging);
+await api('config',{origin:'https://www.staging.example.com',expected:403});
+await api('sessions',{method:'POST',origin:staging,body:{country:'us',captchaToken:await challenge(origins[0])},expected:403});
 for(const origin of ['https://www.example.com','https://www.second.example.com','https://untrusted.invalid','http://example.com']) await api('config',{origin,expected:403});
 const preflight=await fetch(base+'/api/v1/session',{method:'OPTIONS',headers:{Origin:origins[1],'Access-Control-Request-Method':'GET','Access-Control-Request-Headers':'authorization'}});
 assert.equal(preflight.headers.get('access-control-allow-origin'),origins[1]);assert.match(preflight.headers.get('access-control-allow-headers'),/authorization/);
@@ -38,6 +44,9 @@ const responses=await Promise.all([1,2].map(()=>fetch(base+'/api/v1/sessions',{m
 assert.deepEqual(responses.map(r=>r.status).sort(),[200,403]);
 const identity=JSON.parse(await redis('GET',`identity:${hash(first.credential)}`));
 assert.equal(identity.site,'shifter');assert.ok(!JSON.stringify(identity).includes(first.credential));
+assert.equal((await api('session',{credential:first.credential,origin:staging})).expiresAt,first.session.expiresAt,'explicit same-site alias retains the bearer identity and allowance');
+const staged=await api('sessions',{method:'POST',origin:staging,body:{country:'us',captchaToken:await challenge(staging)}});
+await api('session',{credential:staged.credential,origin:origins[1],expected:401});
 await api('session',{credential:first.credential,origin:origins[1],expected:401});
 await api('session',{expected:401});
 await api('session',{credential:'a'.repeat(64),expected:401});

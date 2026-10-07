@@ -11,7 +11,7 @@ await mkdir('artifacts',{recursive:true});
 const dir=await mkdtemp(path.join(root,'artifacts/sdk-check-'));
 const project=path.basename(dir).toLowerCase(),file=path.join(dir,'override.yaml');
 const image=process.env.SDK_TEST_IMAGE || 'shifter-web:sdk-check';
-const origins=JSON.stringify([{origin:'http://localhost:8180',site:'local'},{origin:'http://127.0.0.1:8180',site:'second-local'},{origin:'https://example.com',site:'shifter'},{origin:'https://second.example.com',site:'ip-info'}]);
+const origins=JSON.stringify([{origin:'http://localhost:8180',site:'local'},{origin:'http://127.0.0.1:8180',site:'second-local'},{origin:'https://example.com',site:'shifter'},{origin:'https://second.example.com',site:'ip-info'},{origin:'https://staging.example.com',site:'shifter'}]);
 await writeFile(file,`services:
   haproxy:
     ports: !override ["127.0.0.1:8180:8080", "127.0.0.1:8181:8081"]
