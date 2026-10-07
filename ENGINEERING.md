@@ -95,7 +95,11 @@ The default API origin is the loader's origin. `apiOrigin` is an optional local-
 
 ### Automatic connection recovery
 
-SDK 1.0.3 silently retries a failed GET document navigation at most twice, keeping `loading: true` and the website's branded overlay visible. Backoffs are 300 and 600 milliseconds; each reconnect waits 6.5 seconds for the previous gateway lease to retire before requesting a fresh one-use ticket. Stop, a new SDK operation, destruction, or expiry cancels queued recovery. After the retry budget is exhausted, the SDK sets `status: interrupted`, releases the overlay, and leaves browser controls available without displaying a connection-error banner.
+SDK 1.0.4 negotiates a runtime heartbeat over the existing origin/source/channel/engine-bound bridge. A visible, active embed probes every five seconds and replaces the outer runtime iframe after 15 seconds without a matching reply (up to 20 seconds from a crash). Hidden tabs and host suspension reset the probe deadline. Replacement uses the bounded recovery endpoint, retires the old lease, then loads `index.html` without running storage reset. Each outer runtime generation installs a fresh service worker in the same scope and waits for it to control the frame; this replaces stale engine/transport state while retaining the IndexedDB cookie jar. A narrow compatibility shim serializes v1’s persisted cookie objects before loading them because the pinned `CookieStore.load` implementation otherwise ignores objects. The session keeps its SID, country, expiry, consumed bytes and persisted website storage; the address is opened as GET, never replaying a form body. In-memory page state and navigation history cannot survive renderer loss. Stop, expiry, destruction and explicit navigation cancel pending recovery; Reload or navigation can rebuild an interrupted runtime. The watchdog requires the updated runtime’s heartbeat capability, so older runtimes continue to work without false alarms.
+
+The neutral worker error document retains a script-blocking CSP but omits its own `frame-ancestors`; the enclosing runtime’s configured ancestor allowlist protects the embed. Browser-generated inaccessible error documents are reported as errors rather than successful loads.
+
+SDK 1.0.4 silently retries a failed GET document navigation at most twice, keeping `loading: true` and the website's branded overlay visible. Backoffs are 300 and 600 milliseconds; each reconnect waits 6.5 seconds for the previous gateway lease to retire before requesting a fresh one-use ticket. Stop, a new SDK operation, destruction, or expiry cancels queued recovery. After the retry budget is exhausted, the SDK sets `status: interrupted`, releases the overlay, and leaves browser controls available without displaying a connection-error banner.
 
 A thrown WebSocket connection failure reconnects with the existing SID. A transient SOCKS connection failure can rotate the SID only when the active gateway has recorded that failure for the requested hostname and session revision. Rotation preserves country, region, expiry, used bytes, and byte limit. The atomic Redis operation rejects stale/concurrent recovery, inactive sessions, and more than two recoveries in a 30-second window. The old lease is never cleared early. Redis failures deny recovery.
 
@@ -119,9 +123,9 @@ Production startup rejects missing credentials and Google's public test credenti
 
 ### Release and rollback
 
-Maintain source only under `web/sdk/src/`. `node scripts/build-sdk.mjs 1.0.3` creates/verifies immutable files and a SHA-256 manifest in `web/sdk/releases/1.0.3/`. With no argument, the script verifies the release selected by the loader. It rejects changed content for an existing version. To release an update, pass a new semantic version and change `RELEASE` in `web/sdk/v1/shifter-web-proxy.js` after validating that release.
+Maintain source only under `web/sdk/src/`. `node scripts/build-sdk.mjs 1.0.4` creates/verifies immutable files and a SHA-256 manifest in `web/sdk/releases/1.0.4/`. With no argument, the script verifies the release selected by the loader. It rejects changed content for an existing version. To release an update, pass a new semantic version and change `RELEASE` in `web/sdk/v1/shifter-web-proxy.js` after validating that release.
 
-The loader uses `Cache-Control: public, no-cache`; release assets use a one-year immutable cache. Each page imports one fixed release. Rollback changes the loader's release target; existing page instances keep their release until reloaded. Retain old release directories. v1 releases must preserve protocol 1 so the runtime supports the current and previous SDK release; introduce `/sdk/v2/` for a breaking contract. Release 1.0.3 adds silent status-check retries and removes connection/slow-page notices. The accompanying runtime fixes injected WASM routing and unsupported request-stream transfers. Release 1.0.2 adds bounded proxy recovery. Releases 1.0.1 (CAPTCHA error-frame handling) and 1.0.0 remain available for rollback.
+The loader uses `Cache-Control: public, no-cache`; release assets use a one-year immutable cache. Each page imports one fixed release. Rollback changes the loader's release target; existing page instances keep their release until reloaded. Retain old release directories. v1 releases must preserve protocol 1 so the runtime supports the current and previous SDK release; introduce `/sdk/v2/` for a breaking contract. Release 1.0.4 adds runtime heartbeat detection and replacement without a new CAPTCHA, plus an embeddable worker failure document. Release 1.0.3 adds silent status-check retries and removes connection/slow-page notices. The accompanying runtime fixes injected WASM routing and unsupported request-stream transfers. Release 1.0.2 adds bounded proxy recovery. Releases 1.0.1 (CAPTCHA error-frame handling) and 1.0.0 remain available for rollback.
 
 Deploy the API and assets before changing website adapters, and disable the old production session creation at that cutover. Old cookie sessions are not imported: visitors complete a fresh CAPTCHA for a new origin-scoped identity. Update Redis ACLs before deploying; missing permissions fail closed.
 
@@ -339,13 +343,15 @@ The example Compose environment supplies the following defaults. Customize the i
 | `SHIFTER_REGION` | `blr` | Explicit Shifter ingress region |
 | `SESSION_SECONDS` | `1800` | Daily browsing window, maximum 1800 seconds (30 minutes) |
 | `BYTE_LIMIT` | `104857600` | 100 MiB combined destination payload per UTC day |
-| `MAX_STREAMS` | `32` | Concurrent destination streams per Wisp connection; configuration maximum 128 |
-| `STREAM_RATE` | `8` | New destination streams per second |
-| `STREAM_BURST` | `16` | Redis token-bucket burst size |
+| `MAX_STREAMS` | `64` | Concurrent destination streams per Wisp connection; configuration maximum 128 |
+| `STREAM_RATE` | `32` | New destination streams per second |
+| `STREAM_BURST` | `64` | Redis token-bucket burst size |
 | `CONNECT_TIMEOUT_SECONDS` | `15` | DNS plus authenticated upstream establishment timeout |
-| `IDLE_TIMEOUT_SECONDS` | `60` | Destination-stream idle timeout |
+| `IDLE_TIMEOUT_SECONDS` | `15` | Destination-stream idle timeout |
 
-A separate protocol-flood guard terminates a Wisp connection after more than 32 CONNECT packets within its one-second admission window. Raising the token-bucket settings does not remove that guard.
+Gateway admission waits up to 20 seconds for a concurrent stream slot and a Redis rate token. Active and waiting tasks together are bounded at twice `MAX_STREAMS`; overflow or timeout refuses only that stream. Rate-token checks serialize during bursts and deny access on Redis failure. The 15-second default idle timeout frees unused connections from earlier pages. A separate protocol-flood guard terminates a Wisp connection after more than 256 CONNECT packets within its one-second window, or more than 256 unconsumed CONNECTs in the mux admission backlog. Authorization, destination policy, expiry and byte accounting still apply.
+
+These are new defaults and portable examples, not changes to an existing installation’s ignored `.env` or deployment files. Deployments that explicitly set 32/8/16/60 retain those values until operators update them. Validate capacity before adopting the new 64-stream, 32/s, 64-burst, 15-second idle settings.
 
 These advanced settings are set in the local Compose environment or supplied when running the binary directly:
 
@@ -562,7 +568,7 @@ npm audit --audit-level=high
 | Check | Coverage |
 | --- | --- |
 | `integration.mjs` | Country validation, Origin checks, forged/reused tickets, per-visitor country/SID isolation, one active connection, malformed Wisp, forbidden destinations/ports/UDP, reconnect context, country revocation, synthetic form response, shared byte cap, expiry, Stop/resume allowance |
-| `limits.mjs` | Ticket TTL/expiry, outstanding ticket revocation, unauthorized country changes, sixteen-stream burst, thirty-two-stream concurrency cap |
+| `limits.mjs` | Ticket TTL/expiry, outstanding ticket revocation, unauthorized country changes, paced connection bursts, queued navigation, configured concurrency cap, bounded overflow, idle retirement and CONNECT flood protection |
 | `load.mjs` | 10, 100, 500, and 1,000 simultaneous mock sessions; two 128 KiB requests per session; errors, latency percentiles, throughput, replica counts, sampled Docker CPU/memory |
 | `failover.mjs` | Different countries on one replica, replica failure/recovery with preserved SID/allowance, Redis outage and fail-closed behavior |
 | `configuration.mjs` | Production-mode rejection, read-only gateway secret mounts, loopback-only application listeners, private/internal Redis with no published ports, isolated bridge modes, restricted network membership, working application access, and blocked HAProxy access |
@@ -621,13 +627,13 @@ npm test
 cargo test
 node scripts/build-sdk.mjs
 docker build -t shifter-web:sdk-check .
-node tests/run-sdk-tests.mjs
+node tests/run-sdk-tests.mjs --browser  # Requires local system Chrome; omit --browser for backend checks only
 HTTPS_TEST_IMAGE=shifter-web:sdk-check HTTPS_TEST_REDIS_TLS=1 node tests/https-deployment.mjs
 ```
 
-The SDK runner creates a separate disposable local project on loopback ports 8180/8181, runs the origin/CAPTCHA/identity/cache checks, existing transport/quota integration tests, and Redis network-policy checks, then removes that project. It never rewrites the developer's active configuration. `--keep` retains it for browser checks and writes its cleanup context under ignored `artifacts/`.
+The SDK runner creates a separate disposable local project on loopback ports 8180/8181, runs the origin/CAPTCHA/identity/cache checks, transport/quota integration tests, stream admission checks, and Redis network-policy checks, then removes that project. It never rewrites the developer's active configuration. `--browser` additionally exercises a forced Chrome renderer crash and cross-origin navigation recovery before cleanup. `--keep` retains it for further browser checks and writes its cleanup context under ignored `artifacts/`.
 
-Recovery tests cover hidden error documents, worker capability validation, website HTTP-error passthrough, POST safety, stale frames, retry limits, Stop/destruction cancellation, gateway-attested SID rotation, concurrent recovery, and unchanged quota/expiry. The TLS fixture also exercises recovery under the production Redis ACL and verifies that storage loss denies recovery. Automated runtime tests use a simulated DOM/service-worker bridge; a real-browser recovery acceptance run remains necessary.
+Recovery tests cover hidden error documents, worker capability validation, website HTTP-error passthrough, POST safety, stale frames, retry limits, Stop/destruction cancellation, gateway-attested SID rotation, concurrent recovery, and unchanged quota/expiry. The TLS fixture also exercises recovery under the production Redis ACL and verifies that storage loss denies recovery. Unit runtime tests use a simulated DOM/service-worker bridge. `node tests/browser-recovery.mjs` also runs local system Chrome in a disposable profile against the stack kept by `tests/run-sdk-tests.mjs --keep`: it crashes the cross-site runtime renderer with CDP, verifies automatic recovery and persisted state, and exercises the worker error document under a cross-origin embed. It never opens the person’s normal browser profile. The YouTube-after-BBC crash cause remains unconfirmed; synthetic crash recovery does not establish its memory or engine cause. A real-site reproduction and renderer memory/crash diagnostics remain necessary before claiming the original crash is eliminated.
 
 Unit tests cover modal cancellation, concurrent clicks, errors, bearer requests, stale messages, storage denial, cleanup, and Google challenge focus handling. The TLS fixture seeds a verified synthetic identity directly in its private Redis for WSS testing; it does not claim to solve a real CAPTCHA or expose a production bypass. Real credentials are never used by synthetic tests. Local browser checks exercised the branded and minimal UIs on different local site origins, mobile and desktop browsing, cancellation, and Stop/cleanup. Google’s live widget script was unavailable in that browser session; synthetic verification was used for successful session flows. Real Google challenge acceptance on the two production websites remains outstanding.
 

@@ -37,6 +37,8 @@ test('only thrown transport failures produce a trusted recovery capability; webs
   const results=await Promise.all(['websocket','upstream','engine-error'].map(async path=>{
     const response=await w.fetch(path),text=await response.text();assert.doesNotMatch(text,/Uh oh|stack|Hyper/);
     assert.match(response.headers.get('cache-control'),/no-store/);
+    assert.doesNotMatch(response.headers.get('content-security-policy'), /frame-ancestors/, 'inert error page must work beneath an authorized cross-origin runtime');
+    assert.match(response.headers.get('content-security-policy'), /default-src 'none'/);
     const id=text.match(/data-id="([^"]+)"/)[1];
     assert.equal(w.lookup(id,'https://runtime.test/service/destination'),'no reply');
     const failure=w.lookup(id);assert.equal(failure.method,'GET');assert.equal(w.lookup(id),null);
@@ -49,6 +51,20 @@ test('worker carries the actual POST method and ignores subresource failures',as
   const w=worker(),response=await w.fetch('websocket','POST');
   const id=(await response.text()).match(/data-id="([^"]+)"/)[1];assert.equal(w.lookup(id).method,'POST');
   assert.match(await (await w.fetch('upstream','GET','cors')).text(),/Raw diagnostic/,'only document navigation is eligible');
+});
+
+test('worker restores Scramjet v1 object cookie jars after a worker restart',async()=>{
+  let jar;
+  class Engine {
+    constructor() {
+      jar=this.cookieStore={value:{},load(value){if(typeof value==='object')return value;this.value=JSON.parse(value);}};
+      // Match the pinned engine's asynchronous IndexedDB restore.
+      Promise.resolve().then(()=>jar.load({'fixture.test@/@marker':{name:'marker',value:'preserved'}}));
+    }
+  }
+  runInNewContext(source,{self:{addEventListener(){}},importScripts(){},installRequestBodyCompatibility(){},$scramjetLoadWorker:()=>({ScramjetServiceWorker:Engine})});
+  await Promise.resolve();assert.equal(jar.value['fixture.test@/@marker'].value,'preserved');
+  jar.load('{"stringFormat":true}');assert.equal(jar.value.stringFormat,true);
 });
 
 test('injected WASM script uses Scramjet wrapper while raw WASM/reset assets bypass configuration',async()=>{

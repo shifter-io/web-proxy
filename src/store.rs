@@ -281,14 +281,19 @@ impl Store {
         burst: u64,
     ) -> Result<bool> {
         let ok:i64=Script::new(r#"
-            if redis.call('HGET',KEYS[1],'owner')~=ARGV[1] then return 0 end
+            if redis.call('HGET',KEYS[1],'owner')~=ARGV[1]
+              or redis.call('HGET',KEYS[1],'rev')~=ARGV[5]
+              or redis.call('HGET',KEYS[1],'stopped')~='0' then return 0 end
             local now=tonumber(ARGV[2])
+            if tonumber(redis.call('HGET',KEYS[1],'exp') or '0')<=now
+              or tonumber(redis.call('HGET',KEYS[1],'lease_until') or '0')<=now
+              or tonumber(redis.call('HGET',KEYS[1],'used') or '0')>=tonumber(redis.call('HGET',KEYS[1],'limit') or '0') then return 0 end
             local last=tonumber(redis.call('HGET',KEYS[1],'rate_time') or ARGV[2])
             local tokens=math.min(tonumber(ARGV[4]),tonumber(redis.call('HGET',KEYS[1],'rate_tokens') or ARGV[4])+(now-last)*tonumber(ARGV[3])/1000)
             if tokens<1 then return 0 end
             redis.call('HSET',KEYS[1],'rate_time',now,'rate_tokens',tokens-1)
             return 1
-        "#).key(&s.key).arg(owner).arg(now_ms()).arg(rate).arg(burst).invoke_async(&mut self.db.clone()).await?;
+        "#).key(&s.key).arg(owner).arg(now_ms()).arg(rate).arg(burst).arg(s.revision).invoke_async(&mut self.db.clone()).await?;
         Ok(ok == 1)
     }
 }
