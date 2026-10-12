@@ -53,6 +53,8 @@ try {
   await command('node',['tests/limits.mjs']);
   await command('node',['tests/configuration.mjs']);
   if(process.argv.includes('--browser')) await command('node',['tests/browser-recovery.mjs']);
+  if(process.argv.includes('--mobile-compat')) await command('node',['tests/browser-recovery.mjs','--mobile-compat']);
+  if(process.argv.includes('--legacy-api-compat')) await command('node',['tests/browser-recovery.mjs','--legacy-api-compat']);
   success=true;
   if(process.argv.includes('--keep')) {
     await writeFile(path.join(root,'artifacts/sdk-test-context.json'),JSON.stringify({project,dir,composeFile:env.COMPOSE_FILE}));

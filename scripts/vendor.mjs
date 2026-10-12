@@ -14,7 +14,18 @@ for (const [name, path] of Object.entries({ scram: scramjetPath, baremux: baremu
 // Patch the document bootstrap, including rewritten srcdoc frames, rather than
 // disabling browser features in the trusted runtime or changing website HTML.
 const scramPath = 'web/runtime/vendor/scram/scramjet.all.js';
-const scramSource = await readFile(scramPath, 'utf8');
+// Patch both the standalone and Scramjet-bundled BareMux copies. The fallback
+// supplies native MessagePorts; transport, authorization and quotas are intact.
+function mobileBareMux(source) {
+  const branch = /else if\(([a-z])&&SharedWorker\)/g;
+  if ([...source.matchAll(branch)].length !== 1) throw new Error('BareMux channel setup changed; review Android compatibility.');
+  return source.replace(branch, 'else if(globalThis.__shifterBareMuxPort)this.port=globalThis.__shifterBareMuxPort();$&');
+}
+for (const asset of ['index.js', 'index.mjs']) {
+  const path = `web/runtime/vendor/baremux/${asset}`;
+  await writeFile(path, mobileBareMux(await readFile(path, 'utf8')));
+}
+const scramSource = mobileBareMux(await readFile(scramPath, 'utf8'));
 const bootstrap = '\n\t\t$scramjetLoadClient().loadAndHook(';
 if (scramSource.split(bootstrap).length !== 2) {
   throw new Error('Scramjet document bootstrap changed; review document compatibility.');

@@ -25,6 +25,18 @@ try {
   await permissions.send('Browser.grantPermissions',{origin:runtimeOrigin,permissions:['localNetworkAccess','localNetwork','loopbackNetwork']});
   await permissions.detach();
   page=await browser.newPage();
+  if (process.argv.includes('--legacy-api-compat')) {
+    await page.evaluateOnNewDocument(() => {
+      for (const name of ['any','timeout']) Object.defineProperty(AbortSignal,name,{value:undefined,configurable:true});
+    });
+  }
+  if (process.argv.includes('--mobile-compat')) {
+    await page.evaluateOnNewDocument(origin => {
+      if (location.origin !== origin) return;
+      Object.defineProperty(window,'SharedWorker',{value:undefined,configurable:true});
+      Object.defineProperty(indexedDB,'databases',{value:undefined,configurable:true});
+    }, runtimeOrigin);
+  }
   page.on('console',message=>{if(message.type()==='error')consoleErrors.push(message.text());});
   await page.goto(host+'/minimal.html');
   await page.evaluate(async({api,release,token})=>{
@@ -44,9 +56,19 @@ try {
     assert.equal(await page.evaluate(()=>testProxy.getState().status),'browsing');
   };
   await loaded();
+  if (process.argv.includes('--legacy-api-compat')) {
+    assert.equal(await page.evaluate(()=>typeof AbortSignal.any),'undefined');
+    assert.equal(await page.evaluate(()=>typeof AbortSignal.timeout),'undefined');
+    results.push('The SDK reaches API authorization and loads a destination without AbortSignal.any or timeout');
+  }
   console.log('Browser fixture loaded through the cross-site runtime');
   const destination=()=>page.frames().find(frame=>frame.url().startsWith(runtimeOrigin+'/service/'));
   const runtime=()=>page.frames().find(frame=>frame.url().startsWith(runtimeOrigin+'/index.html'));
+  if (process.argv.includes('--mobile-compat')) {
+    assert.equal(await runtime().evaluate(()=>typeof SharedWorker),'undefined');
+    assert.equal(await runtime().evaluate(()=>typeof indexedDB.databases),'undefined');
+    results.push('Missing Android SharedWorker and IndexedDB enumeration use the dedicated transport and known-database cleanup');
+  }
   await destination().waitForSelector('#identity');
   // The synthetic SOCKS server cannot serve publicsuffix.org over HTTPS.
   // Cold-profile cross-origin modules must not depend on that network fetch.
@@ -80,7 +102,7 @@ try {
   const target=browser.targets().find(target=>target.url()===runtime().url());
   assert.ok(target,'runtime must occupy a separate renderer target');
   const cdp=await target.createCDPSession();
-  const crash=cdp.send('Page.crash').catch(()=>{});
+  const crash=cdp.send('Page.crash',undefined,{timeout:10000}).catch(()=>{});
   console.log('Crashed only the disposable runtime renderer');
   await page.waitForFunction(()=>testProxy.getState().status==='connecting',{timeout:30000});
   await loaded();
@@ -107,7 +129,8 @@ try {
   results.push('Cross-origin embedded navigation failures reach recovery, stop at the retry bound, and allow later navigation');
   await page.evaluate(()=>testProxy.stop());
   results.push('Stop clears the recovered runtime');
-  await writeFile('artifacts/browser-recovery.json',JSON.stringify({at:new Date().toISOString(),release,results},null,2));
+  const mode = ['mobile-compat','legacy-api-compat'].filter(flag=>process.argv.includes('--'+flag));
+  await writeFile(`artifacts/browser-recovery${mode.length?'-'+mode.join('-'):''}.json`,JSON.stringify({at:new Date().toISOString(),release,results},null,2));
   for(const result of results)console.log('PASS',result);
 } catch(error) {
   for(const message of new Set(consoleErrors))console.error(message);

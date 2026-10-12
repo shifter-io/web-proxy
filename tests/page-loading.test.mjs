@@ -30,6 +30,7 @@ test('loading completes, cancels old deadlines, and releases the viewport on tim
 
 test('runtime reports document loads, ignores anchors/cancelled navigation and retired frames', async () => {
   const source = await readFile(new URL('../web/runtime/runtime.js', import.meta.url), 'utf8');
+  const lifecycle = await readFile(new URL('../web/runtime/lifecycle.js', import.meta.url), 'utf8');
   const messages = [], frames = [];
   const parent = {postMessage:message => messages.push(message)};
   const window = new EventTarget();
@@ -56,11 +57,12 @@ test('runtime reports document loads, ignores anchors/cancelled navigation and r
     async init() {}
     createFrame() { const frame = new Frame(); frames.push(frame); return frame; }
   }
-  await runInNewContext(source, {
+  await runInNewContext(lifecycle+'\n'+source, {
+    SharedWorker:class{},WebAssembly,setTimeout,clearTimeout,
     prepareRuntimeData:async()=>{},
     createRuntimeBridge:async () => ({query:'bound', send:(type,data={})=>messages.push({type,...data}), accepts:event=>event.origin==='http://control.test' && event.source===parent && event.data?.source==='shifter-control'}),
     parent, window, URL, queueMicrotask, console,
-    location:{protocol:'http:',host:'runtime.test',replace:() => {}},
+    location:{href:'http://runtime.test/index.html',protocol:'http:',host:'runtime.test',replace:() => {}},
     navigator:{serviceWorker:{register:async () => {},ready:Promise.resolve(),controller:{scriptURL:'http://runtime.test/sw.js?bound'}}},
     $scramjetLoadController:() => ({ScramjetController:Controller}),
     BareMux:{BareMuxConnection:class {async setTransport() {}}},
