@@ -134,7 +134,7 @@ The shared SDK manages verification, session authorization, the destination ifra
 
 The application combines a Rust session API, Rust Wisp gateways, HAProxy, and private Redis. Scramjet runs in the browser; gateways forward destination traffic through Shifter. Upstream account credentials stay on the server.
 
-**Requirements:** Docker with Compose and isolated bridge-network support, plus a browser with service workers, SharedWorkers, and WebAssembly. Live residential traffic also requires your own Shifter account and real CAPTCHA credentials. The repository does not include those services or secrets.
+**Requirements:** Docker with Compose and isolated bridge-network support, plus a browser with service workers, WebAssembly, and either SharedWorkers or dedicated workers. Live residential traffic also requires your own Shifter account and real CAPTCHA credentials. The repository does not include those services or secrets.
 
 From a local checkout:
 
@@ -179,7 +179,7 @@ node scripts/build-sdk.mjs
 python3 scripts/render-readme.py
 ```
 
-SDK 1.0.4 detects an unresponsive browsing runtime and attempts bounded recovery within the existing session. The current runtime uses libcurl transport, bundles its domain suffix data, and retries an interrupted successful script or stylesheet response once. Proxied pages use their normal rendering fallback instead of native View Transitions to avoid a reproduced Chrome compositor crash. The gateway queues short connection bursts and flushes upload flow-control credits. Existing deployment overrides must be updated separately.
+SDK 1.0.6 detects an unresponsive browsing runtime and attempts bounded recovery within the existing session. SDK API requests retain cancellation and timeouts without requiring modern AbortSignal helpers. The runtime supports older Android engines without SharedWorkers or IndexedDB database enumeration, bounds browser setup waits, and keeps failed cleanup mandatory on Reload. The current runtime uses libcurl transport, bundles its domain suffix data, and retries an interrupted successful script or stylesheet response once. Proxied pages use their normal rendering fallback instead of native View Transitions to avoid a reproduced Chrome compositor crash. The gateway queues short connection bursts and flushes upload flow-control credits. Existing deployment overrides must be updated separately.
 
 The [engineering guide](docs/engineering.html) covers architecture, API contracts, session limits, isolation, and troubleshooting. See [testing and validation](docs/engineering.html#testing-and-validation) for container integration checks and bounded live smoke tests.
 

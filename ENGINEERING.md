@@ -93,13 +93,27 @@ State status is `idle`, `initializing`, `ready`, `verifying`, `connecting`, `bro
 
 The default API origin is the loader's origin. `apiOrigin` is an optional local-integration override. `nonce` can be supplied for CSP-authorized injected scripts/styles; the loader inherits its script nonce by default. Neither option changes server authorization.
 
+### Older browser API compatibility
+
+SDK 1.0.6 uses a request AbortController with a 15-second timer and forwards instance destruction to that controller. The deadline covers both the HTTP request and its response body; timers and abort listeners are released after each attempt. Safe API reads and one-use ticket requests retain their existing two retries. Ambiguous mutations are never automatically repeated.
+
+Brave 1.45.133 uses Chromium 107.0.5304.141 ([official release](https://github.com/brave/brave-browser/releases/tag/v1.45.133)). Chromium added `AbortSignal.any()` in version 116 ([compatibility data](https://github.com/mdn/browser-compat-data/blob/main/api/AbortSignal.json)). The earlier SDK called that helper before sending a request, and its catch block misclassified the resulting TypeError as `NETWORK_UNAVAILABLE`, displaying “Connecting to the web proxy. Please try again shortly.” Removing the helper in regression tests reproduces that exact error with the previous code and succeeds with 1.0.6. This explains a deterministic API failure on an unmodified Chromium 107 engine; it does not prove every destination works in that older browser. The full browser fixture can disable both `AbortSignal.any()` and `AbortSignal.timeout()` with `--legacy-api-compat`.
+
+### Mobile browser setup
+
+The runtime uses native SharedWorkers when available. On engines without SharedWorker support, a dedicated worker owned by the trusted outer runtime hosts the same BareMux transport. Fresh MessagePorts connect the runtime, rewritten documents and service worker to that transport. The vendor build patches both BareMux copies, including the one bundled in Scramjet, and checks the pinned channel-setup code before applying the patch. Destination websites retain their native SharedWorker feature detection. Authorization, one-use tickets, private Redis enforcement and quotas use the same paths.
+
+Cleanup always clears the pinned `$scramjet` database and also clears other databases when enumeration is available. Missing `indexedDB.databases()` no longer fails cleanup. Opening a nonexistent database aborts its creation so Scramjet can install its own schema. Aborted transactions fail cleanup. Cleanup has a six-second deadline; runtime configuration reads have a five-second abort deadline, and engine initialization, suffix data, worker registration/activation and transport setup each have a twelve-second deadline. The SDK retains its twenty-second readiness deadline. A setup failure updates the preparation screen and SDK error state. Reload repeats a failed reset before starting; stale messages cannot authorize a failed runtime.
+
+Browsers or embedded webviews that block service workers or required site storage receive an actionable setup error. A setup/storage failure is not evidence of a bad residential exit, so it does not rotate the SID. Reported browser/device combinations still need acceptance on those physical devices; desktop feature-disable tests establish fallback behavior, not complete Android compatibility.
+
 ### Automatic connection recovery
 
-SDK 1.0.4 negotiates a runtime heartbeat over the existing origin/source/channel/engine-bound bridge. A visible, active embed probes every five seconds and replaces the outer runtime iframe after 15 seconds without a matching reply (up to 20 seconds from a crash). Hidden tabs and host suspension reset the probe deadline. Replacement uses the bounded recovery endpoint, retires the old lease, then loads `index.html` without running storage reset. Each outer runtime generation installs a fresh service worker in the same scope and waits for it to control the frame; this replaces stale engine/transport state while retaining the IndexedDB cookie jar. A narrow compatibility shim serializes v1’s persisted cookie objects before loading them because the pinned `CookieStore.load` implementation otherwise ignores objects. The session keeps its SID, country, expiry, consumed bytes and persisted website storage; the address is opened as GET, never replaying a form body. In-memory page state and navigation history cannot survive renderer loss. Stop, expiry, destruction and explicit navigation cancel pending recovery; Reload or navigation can rebuild an interrupted runtime. The watchdog requires the updated runtime’s heartbeat capability, so older runtimes continue to work without false alarms.
+SDK 1.0.6 negotiates a runtime heartbeat over the existing origin/source/channel/engine-bound bridge. A visible, active embed probes every five seconds and replaces the outer runtime iframe after 15 seconds without a matching reply (up to 20 seconds from a crash). Hidden tabs and host suspension reset the probe deadline. Replacement uses the bounded recovery endpoint, retires the old lease, then loads `index.html` without running storage reset. Each outer runtime generation installs a fresh service worker in the same scope and waits for it to control the frame; this replaces stale engine/transport state while retaining the IndexedDB cookie jar. A narrow compatibility shim serializes v1’s persisted cookie objects before loading them because the pinned `CookieStore.load` implementation otherwise ignores objects. The session keeps its SID, country, expiry, consumed bytes and persisted website storage; the address is opened as GET, never replaying a form body. In-memory page state and navigation history cannot survive renderer loss. Stop, expiry, destruction and explicit navigation cancel pending recovery; Reload or navigation can rebuild an interrupted runtime. The watchdog requires the updated runtime’s heartbeat capability, so older runtimes continue to work without false alarms.
 
 The neutral worker error document retains a script-blocking CSP but omits its own `frame-ancestors`; the enclosing runtime’s configured ancestor allowlist protects the embed. Browser-generated inaccessible error documents are reported as errors rather than successful loads.
 
-SDK 1.0.4 silently retries a failed GET document navigation at most twice, keeping `loading: true` and the website's branded overlay visible. Backoffs are 300 and 600 milliseconds; each reconnect waits 6.5 seconds for the previous gateway lease to retire before requesting a fresh one-use ticket. Stop, a new SDK operation, destruction, or expiry cancels queued recovery. After the retry budget is exhausted, the SDK sets `status: interrupted`, releases the overlay, and leaves browser controls available without displaying a connection-error banner.
+SDK 1.0.6 silently retries a failed GET document navigation at most twice, keeping `loading: true` and the website's branded overlay visible. Backoffs are 300 and 600 milliseconds; each reconnect waits 6.5 seconds for the previous gateway lease to retire before requesting a fresh one-use ticket. Stop, a new SDK operation, destruction, or expiry cancels queued recovery. After the retry budget is exhausted, the SDK sets `status: interrupted`, releases the overlay, and leaves browser controls available without displaying a connection-error banner.
 
 A thrown WebSocket connection failure reconnects with the existing SID. A transient SOCKS connection failure can rotate the SID only when the active gateway has recorded that failure for the requested hostname and session revision. Rotation preserves country, region, expiry, used bytes, and byte limit. The atomic Redis operation rejects stale/concurrent recovery, inactive sessions, and more than two recoveries in a 30-second window. The old lease is never cleared early. Redis failures deny recovery.
 
@@ -209,7 +223,7 @@ Never put a real password in a template, a command-line argument, a Docker build
 ## Requirements
 
 - Docker with the Compose plugin, a running local Docker engine, support for BuildKit cache mounts and bridge gateway mode `isolated` (validated locally with Engine 29.4.0).
-- A browser with service workers, SharedWorkers, and WebAssembly support. Browser compatibility beyond the observed local fixture flows is not established.
+- A browser with service workers, WebAssembly, and either SharedWorkers or dedicated workers. Browser compatibility beyond the observed local fixture flows is not established.
 - Node.js 24 when running the host-side test scripts or vendoring assets outside Docker.
 - Rust/Cargo compatible with Rust 1.94.1 when running host-side Rust checks. The Docker build includes the pinned toolchain.
 - Python 3.11 or newer for `tests/secret-scan.py`; Python 3 for the offline README renderer.
@@ -641,7 +655,7 @@ npm test
 cargo test
 node scripts/build-sdk.mjs
 docker build -t shifter-web:sdk-check .
-node tests/run-sdk-tests.mjs --browser  # Requires local system Chrome; omit --browser for backend checks only
+node tests/run-sdk-tests.mjs --browser --mobile-compat --legacy-api-compat  # Requires local Chrome; omit browser flags for backend checks only
 HTTPS_TEST_IMAGE=shifter-web:sdk-check HTTPS_TEST_REDIS_TLS=1 node tests/https-deployment.mjs
 ```
 

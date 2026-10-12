@@ -21,7 +21,7 @@ export function create({container, apiOrigin, nonce} = {}) {
   let config, credential, storageKey, frame, channel, generation = 0, ready = false, pendingUrl, wasConnected = false;
   let destroyed = false, initialized, cleanupResolve, loadingTimer, runtimeTimer, polling = false, pollFailures = 0, nextPoll = 0;
   let revision, engineId, retries = 0, recoveryTask, recoveryAbort, recoveryVersion = 0, needsTransport = false;
-  let runtimeDead = false, heartbeat = false, probe, lastWatch = Date.now();
+  let runtimeDead = false, runtimeNeedsReset = false, heartbeat = false, probe, lastWatch = Date.now(), cleanupReject;
   const listeners = new Set(), controller = new AbortController(), waits = new Map();
   const emit = patch => {
     if (destroyed) return;
@@ -37,12 +37,30 @@ export function create({container, apiOrigin, nonce} = {}) {
   }
   async function api(path, method = 'GET', body, attempt = 0) {
     ensure();
-    let response;
-    try { response = await fetch(`${apiOrigin}/api/v1/${path}`, {
-      method, credentials:'omit', signal:AbortSignal.any([controller.signal, AbortSignal.timeout(15000)]),
-      headers:{...(credential ? {Authorization:`Bearer ${credential}`} : {}), ...(body ? {'Content-Type':'application/json'} : {})},
-      body:body ? JSON.stringify(body) : undefined,
-    }); } catch (cause) {
+    let response, data;
+    try {
+      // AbortSignal.any is absent in Chromium 107 (Brave 1.45). Use the older
+      // AbortController API, retaining cancellation and the response deadline.
+      const request = new AbortController();
+      const abort = () => request.abort();
+      const timer = setTimeout(abort, 15000);
+      controller.signal.addEventListener('abort', abort, {once:true});
+      if (controller.signal.aborted) abort();
+      try {
+        response = await fetch(`${apiOrigin}/api/v1/${path}`, {
+          method, credentials:'omit', signal:request.signal,
+          headers:{...(credential ? {Authorization:`Bearer ${credential}`} : {}), ...(body ? {'Content-Type':'application/json'} : {})},
+          body:body ? JSON.stringify(body) : undefined,
+        });
+        data = await response.json().catch(error => {
+          if (request.signal.aborted) throw error;
+          return {};
+        });
+      } finally {
+        clearTimeout(timer);
+        controller.signal.removeEventListener('abort', abort);
+      }
+    } catch (cause) {
       if (controller.signal.aborted) { ensure(); throw cause; }
       if ((method === 'GET' || path === 'session/tickets') && attempt < 2) {
         await delay(500 * 2 ** attempt, controller.signal);
@@ -50,7 +68,6 @@ export function create({container, apiOrigin, nonce} = {}) {
       }
       throw Object.assign(failure('NETWORK_UNAVAILABLE','Connecting to the web proxy. Please try again shortly.'), {transient:true});
     }
-    const data = await response.json().catch(() => ({}));
     ensure();
     if (!response.ok) {
       if (response.status === 401) { credential = undefined; try { localStorage.removeItem(storageKey); } catch {} }
@@ -168,13 +185,14 @@ export function create({container, apiOrigin, nonce} = {}) {
     ensure();
     if (state.session?.status !== 'active') return;
     generation++; channel = crypto.randomUUID(); ready = false; wasConnected = false; pendingUrl = url;
+    runtimeNeedsReset = reset || runtimeNeedsReset;
     runtimeDead = false; heartbeat = false; probe = null;
     frame?.remove(); frame = document.createElement('iframe');
     frame.title = 'Proxied browsing session';
     frame.setAttribute('sandbox','allow-scripts allow-same-origin allow-forms allow-downloads');
     frame.style.cssText = 'border:0;width:100%;height:100%;display:block';
     const params = new URLSearchParams({parentOrigin:location.origin,channel,protocolVersion:String(protocolVersion)});
-    frame.src = `${config.runtimeOrigin}/${reset ? 'reset' : 'index'}.html?${params}`;
+    frame.src = `${config.runtimeOrigin}/${runtimeNeedsReset ? 'reset' : 'index'}.html?${params}`;
     container.append(frame); loading(true); emit({status:'connecting',active:true,url});
     clearTimeout(runtimeTimer);
     runtimeTimer = setTimeout(() => {
@@ -184,6 +202,7 @@ export function create({container, apiOrigin, nonce} = {}) {
   async function clearRuntime() {
     if (!frame) return;
     generation++; pendingUrl = null; ready = false;
+    runtimeNeedsReset = true;
     probe = null; heartbeat = false;
     clearTimeout(runtimeTimer);
     // Tear down engine handles before clearing storage. Keep cleanup independent
@@ -198,12 +217,13 @@ export function create({container, apiOrigin, nonce} = {}) {
     let timer;
     const cleared = new Promise((resolve, reject) => {
       cleanupResolve = resolve;
+      cleanupReject = reject;
       timer = setTimeout(() => reject(failure('CLEANUP_FAILED','The previous browsing context could not be cleared. Reload this page before trying again.')),8000);
     });
     frame.src = `${config.runtimeOrigin}/reset.html?${new URLSearchParams({parentOrigin:location.origin,channel,protocolVersion:String(protocolVersion)})}#stop`;
     document.body.append(frame);
     try { await cleared; frame?.remove(); frame = null; }
-    finally { clearTimeout(timer); cleanupResolve = null; ready = false; }
+    finally { clearTimeout(timer); cleanupResolve = cleanupReject = null; ready = false; }
   }
   async function message(event) {
     const data = event.data;
@@ -213,7 +233,7 @@ export function create({container, apiOrigin, nonce} = {}) {
     if (runtimeDead && !cleanupResolve) return;
     try {
       if (data.type === 'ready' && !cleanupResolve) {
-        clearTimeout(runtimeTimer); ready = true; heartbeat = data.heartbeat === true; probe = null;
+        clearTimeout(runtimeTimer); ready = true; runtimeNeedsReset = false; heartbeat = data.heartbeat === true; probe = null;
         if (state.active && pendingUrl) { const url = pendingUrl; pendingUrl = null; await authorize(url); }
       } else if (data.type === 'cleared') cleanupResolve?.();
       else if (data.type === 'pong' && data.engineId === engineId && data.probe === probe?.id) probe = null;
@@ -223,6 +243,8 @@ export function create({container, apiOrigin, nonce} = {}) {
       else if (data.type === 'url' && state.active && typeof data.url === 'string') emit({url:data.url});
       else if (data.type === 'error') {
         loading(false); clearTimeout(runtimeTimer);
+        if (!ready) runtimeDead = true;
+        cleanupReject?.(failure('CLEANUP_FAILED', String(data.message || 'The browser could not reset site storage.')));
         emit({status:'interrupted',error:{code:'RUNTIME_ERROR',message:String(data.message || 'The browser runtime failed.')}});
       }
     } catch (error) { loading(false); report(error); }

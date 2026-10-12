@@ -5,6 +5,7 @@ import {runInNewContext} from 'node:vm';
 import {MessageChannel} from 'node:worker_threads';
 import {JSDOM} from 'jsdom';
 const source=await readFile(new URL('../web/runtime/runtime.js',import.meta.url),'utf8');
+const lifecycle=await readFile(new URL('../web/runtime/lifecycle.js',import.meta.url),'utf8');
 const flush=async()=>{for(let i=0;i<20;i++)await Promise.resolve();};
 async function runtime(t) {
   const dom=new JSDOM('<div id="loading">Loading</div>',{url:'https://runtime.test/index.html'});
@@ -15,7 +16,7 @@ async function runtime(t) {
   }
   const controller={postMessage:(data,ports)=>{lookups.push({data,reply:value=>ports[0].postMessage(value)});}};
   const bridge={query:'channel=fixture-generation',send:(type,data)=>sent.push({type,...data}),accepts:()=>true};
-  await runInNewContext(source,{prepareRuntimeData:async()=>{},createRuntimeBridge:async()=>bridge,document:window.document,window,location:window.location,navigator:{serviceWorker:{register:async(url,options)=>{assert.equal(options.scope,'/');assert.equal(url,'/sw.js?'+bridge.query);controller.scriptURL='https://runtime.test'+url;},ready:Promise.resolve(),controller}},$scramjetLoadController:()=>({ScramjetController:class {async init(){}createFrame(){return new Frame();}}}),BareMux:{BareMuxConnection:class {async setTransport(){}}},URL,MessageChannel,setTimeout,clearTimeout,queueMicrotask,console});
+  await runInNewContext(lifecycle+'\n'+source,{SharedWorker:class{},WebAssembly,prepareRuntimeData:async()=>{},createRuntimeBridge:async()=>bridge,document:window.document,window,location:window.location,navigator:{serviceWorker:{register:async(url,options)=>{assert.equal(options.scope,'/');assert.equal(url,'/sw.js?'+bridge.query);controller.scriptURL='https://runtime.test'+url;},ready:Promise.resolve(),controller}},$scramjetLoadController:()=>({ScramjetController:class {async init(){}createFrame(){return new Frame();}}}),BareMux:{BareMuxConnection:class {async setTransport(){}}},URL,MessageChannel,setTimeout,clearTimeout,queueMicrotask,console});
   t.after(()=>window.close());
   async function command(command,data={}){window.dispatchEvent(new window.MessageEvent('message',{data:{command,...data}}));await flush();}
   async function load(marker){

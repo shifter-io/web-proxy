@@ -208,7 +208,7 @@ test('runtime bridge binds origin, source, protocol and channel',async()=>{
   const source=await readFile(new URL('../web/runtime/bridge.js',import.meta.url),'utf8');
   const parent={postMessage(){}}, window={};
   const channel='12345678-1234-1234-1234-123456789abc';
-  runInNewContext(source,{window,parent,URLSearchParams,location:{search:`?parentOrigin=https%3A%2F%2Fexample.com&channel=${channel}&protocolVersion=1`},fetch:async()=>({ok:true,json:async()=>({allowedOrigins:['https://example.com'],protocolVersions:[1]})})});
+  runInNewContext(source,{window,parent,URLSearchParams,AbortController,setTimeout,clearTimeout,location:{search:`?parentOrigin=https%3A%2F%2Fexample.com&channel=${channel}&protocolVersion=1`},fetch:async()=>({ok:true,json:async()=>({allowedOrigins:['https://example.com'],protocolVersions:[1]})})});
   const bridge=await window.createRuntimeBridge();
   const event={origin:'https://example.com',source:parent,data:{source:'shifter-control',channel,protocolVersion:1}};
   assert.ok(bridge.accepts(event));
@@ -222,6 +222,26 @@ test('first-party storage denial preserves the current in-memory session',async 
   await e.start();assert.equal(e.proxy.getState().persistent,false);
   e.runtimeMessage('ready');await flush();
   assert.ok(e.requests.find(r=>r.url.endsWith('/tickets')).options.headers.Authorization);
+});
+
+test('Reload cannot skip a failed browser cleanup, and stale readiness cannot start browsing',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const e=environment(t);await e.start();
+  e.runtimeMessage('error',{message:'Allow site storage and select Reload.'});
+  assert.equal(e.proxy.getState().status,'interrupted');
+  e.runtimeMessage('ready');await flush();
+  assert.ok(!e.requests.some(r=>r.url.endsWith('/tickets')));
+  const reload=e.proxy.reload();await flush();t.mock.timers.tick(6500);await flush();await reload;
+  assert.equal(new URL(document.querySelector('#view iframe').src).pathname,'/reset.html');
+  e.runtimeMessage('ready');await flush();
+  assert.equal(e.requests.filter(r=>r.url.endsWith('/tickets')).length,1);
+});
+
+test('Stop rejects an explicit cleanup failure immediately without waiting for the timeout',async t=>{
+  const e=environment(t);await e.start();
+  const stop=e.proxy.stop();const rejection=assert.rejects(stop,{code:'CLEANUP_FAILED'});
+  await flush();e.runtimeMessage('error',{message:'Browser storage is unavailable.'});await rejection;
+  assert.equal(e.proxy.getState().active,false);
 });
 
 test('Stop waits for runtime cleanup and retains anonymous identity',async t=>{
@@ -435,6 +455,64 @@ test('gateway 502 API reads retry before initialization succeeds',async t=>{
   const init=e.proxy.init();await flush();
   t.mock.timers.tick(500);await flush();t.mock.timers.tick(1000);await init;
   assert.equal(calls,3);assert.equal(e.proxy.getState().error,null);
+});
+
+test('browsers without AbortSignal.any or timeout initialize and start with cancellable API requests',async t=>{
+  const e=environment(t);
+  const saved={};
+  for(const name of ['any','timeout']) {
+    saved[name]=Object.getOwnPropertyDescriptor(AbortSignal,name);
+    Object.defineProperty(AbortSignal,name,{value:undefined,configurable:true});
+  }
+  t.after(()=>{for(const name of ['any','timeout'])Object.defineProperty(AbortSignal,name,saved[name]);});
+  await e.start();e.runtimeMessage('ready');await flush();
+  assert.equal(e.proxy.getState().error,null);
+  assert.ok(e.requests.some(r=>r.url.endsWith('/tickets')));
+  for(const request of e.requests)assert.ok(request.options.signal instanceof AbortSignal);
+});
+
+test('API timeout cancels stalled response bodies and retries safe reads only',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const e=environment(t),original=globalThis.fetch,signals=[];
+  t.mock.method(globalThis,'fetch',async(url,options)=>{
+    signals.push(options.signal);
+    if(signals.length===3)return original(url,options);
+    return {ok:true,status:200,json:()=>new Promise((_,reject)=>{
+      options.signal.addEventListener('abort',()=>reject(new DOMException('Aborted','AbortError')),{once:true});
+    })};
+  });
+  const init=e.proxy.init();await flush();
+  for(const ms of [15000,500,15000,1000]){t.mock.timers.tick(ms);await flush();}
+  await init;
+  assert.equal(signals.length,3);assert.ok(signals[0].aborted&&signals[1].aborted);
+  t.mock.timers.tick(15000);e.proxy.destroy();
+  assert.equal(signals[2].aborted,false,'completed requests release deadline and lifetime listeners');
+});
+
+test('destroy aborts an in-flight API request without scheduling another attempt',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const e=environment(t);let signal,calls=0;
+  t.mock.method(globalThis,'fetch',async(url,options)=>{
+    calls++;signal=options.signal;
+    return new Promise((_,reject)=>signal.addEventListener('abort',()=>reject(new DOMException('Aborted','AbortError')),{once:true}));
+  });
+  const init=e.proxy.init(),rejection=assert.rejects(init,{code:'DESTROYED'});await flush();
+  e.proxy.destroy();await rejection;t.mock.timers.tick(30000);await flush();
+  assert.equal(signal.aborted,true);assert.equal(calls,1);
+});
+
+test('an ambiguous country-change timeout never repeats the mutation',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const e=environment(t);await e.start();e.runtimeMessage('ready');await flush();
+  const original=globalThis.fetch;let changes=0;
+  t.mock.method(globalThis,'fetch',async(url,options)=>{
+    if(!url.endsWith('/country'))return original(url,options);
+    changes++;
+    return new Promise((_,reject)=>options.signal.addEventListener('abort',()=>reject(new DOMException('Aborted','AbortError')),{once:true}));
+  });
+  const change=e.proxy.changeCountry('de');await flush();t.mock.timers.tick(15000);await flush();await change;
+  assert.equal(changes,1);assert.equal(e.proxy.getState().status,'interrupted');
+  assert.equal(e.proxy.getState().session.country,'us');
 });
 
 test('destroy cancels queued API retries',async t=>{

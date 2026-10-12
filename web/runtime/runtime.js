@@ -5,6 +5,11 @@
   let engineId;
   const send = (type, data = {}) => bridge.send(type, {...data, engineId});
   let frame, connection, started = false, commandVersion = 0, targetUrl;
+  const showError = message => {
+    const loading = document.getElementById('loading');
+    if (loading) loading.textContent = message;
+    send('error', {message});
+  };
   async function failureDetails(id) {
     return new Promise(resolve => {
       const channel = new MessageChannel();
@@ -14,26 +19,20 @@
     });
   }
   try {
+    if (!navigator.serviceWorker || typeof WebAssembly !== 'object'
+      || (typeof SharedWorker === 'undefined' && typeof window.__shifterBareMuxPort !== 'function')) {
+      throw new Error('This browser lacks the features needed for proxy browsing. Open the page in an updated full browser.');
+    }
     const { ScramjetController } = $scramjetLoadController();
     const scramjet = new ScramjetController({flags:{syncxhr:false},prefix:'/service/',files:{wasm:'/vendor/scram/scramjet.wasm.wasm',all:'/vendor/scram/scramjet.all.js',sync:'/vendor/scram/scramjet.sync.js'}});
-    await scramjet.init();
-    await prepareRuntimeData();
+    await runtimeDeadline(() => scramjet.init(), 'Browser storage could not initialize. Allow site storage and select Reload.');
+    await runtimeDeadline(() => prepareRuntimeData(), 'Browser setup timed out. Select Reload to try again.');
     // A crashed renderer can leave the old worker's engine/transport state
     // unusable. Install a fresh worker for this outer frame, retaining its DB
     // and cookie jar. Waiting for ready alone can return the previous worker.
     const workerUrl = '/sw.js?' + bridge.query;
-    await navigator.serviceWorker.register(workerUrl, {scope:'/'});
-    await navigator.serviceWorker.ready;
-    const controlled = () => navigator.serviceWorker.controller?.scriptURL.endsWith(workerUrl);
-    if (!controlled()) await new Promise(resolve => {
-      const changed = () => {
-        if (!controlled()) return;
-        navigator.serviceWorker.removeEventListener('controllerchange', changed);
-        resolve();
-      };
-      navigator.serviceWorker.addEventListener('controllerchange', changed);
-      changed();
-    });
+    await runtimeDeadline(() => navigator.serviceWorker.register(workerUrl, {scope:'/'}), 'The browser could not register its service worker. Open this page in a full browser and select Reload.');
+    await waitForRuntimeWorker(workerUrl);
     connection = new BareMux.BareMuxConnection('/vendor/baremux/worker.js');
     window.addEventListener('message', async event => {
       if (!bridge.accepts(event)) return;
@@ -52,7 +51,7 @@
           frame?.frame.remove();
           frame = null;
           const websocket = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/wisp/${encodeURIComponent(ticket)}/`;
-          await connection.setTransport('/vendor/libcurl/index.mjs',[{websocket}]);
+          await runtimeDeadline(() => connection.setTransport('/vendor/libcurl/index.mjs',[{websocket}]), 'The browser transport did not start. Select Reload to try again.');
           if (version !== commandVersion) return;
           frame = scramjet.createFrame();
           frame.frame.setAttribute('sandbox','allow-scripts allow-same-origin allow-forms allow-downloads');
@@ -115,8 +114,13 @@
           document.body.appendChild(frame.frame);
         } else if (command === 'go') { targetUrl = url; if (frame) frame.go(url); }
         else if (frame && ['back','forward','reload'].includes(command)) frame[command]();
-      } catch (error) { if (version !== commandVersion) return; console.error('Runtime start failed:','Transport initialization error'); send('error',{message:'The connection could not be established. Stop browsing and try again; your remaining allowance is preserved.'}); }
+      } catch { if (version !== commandVersion) return; showError('The connection could not be established. Select Reload to try again; your remaining allowance is preserved.'); }
     });
     send('ready', {heartbeat:true});
-  } catch { send('error',{message:'The browser runtime could not initialize. Reload to try again.'}); }
+  } catch (error) {
+    // Only our setup messages are shown; never surface engine internals.
+    const message = /^(This browser lacks|Browser storage could|Browser setup timed|The browser (did not activate|could not register))/.test(error.message || '')
+      ? error.message : 'The browser runtime could not initialize. Allow site storage and select Reload to try again.';
+    showError(message);
+  }
 })();

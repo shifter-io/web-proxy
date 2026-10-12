@@ -4,9 +4,14 @@ window.createRuntimeBridge = async () => {
   const parentOrigin = params.get('parentOrigin');
   const channel = params.get('channel');
   const protocolVersion = Number(params.get('protocolVersion'));
-  const response = await fetch('/settings');
-  if (!response.ok) throw new Error('Runtime configuration unavailable');
-  const config = await response.json();
+  const request = new AbortController();
+  const timer = setTimeout(() => request.abort(), 5000);
+  let config;
+  try {
+    const response = await fetch('/settings', {signal:request.signal});
+    if (!response.ok) throw new Error('Runtime configuration unavailable');
+    config = await response.json();
+  } finally { clearTimeout(timer); }
   if (parent === window || !config.allowedOrigins.includes(parentOrigin)
     || !config.protocolVersions.includes(protocolVersion) || !/^[a-f0-9-]{36}$/.test(channel || '')) {
     throw new Error('Invalid runtime parent');
