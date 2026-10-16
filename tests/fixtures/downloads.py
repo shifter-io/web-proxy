@@ -37,7 +37,8 @@ def response(path, headers):
     extra = '' if disposition == 'none' else f'Content-Disposition: {disposition}; filename="fixture.{extension}"\r\n'
     if 'range' in headers:
         return '206 Partial Content', content_type, extra + f'Content-Range: bytes 0-9/{len(BODY)}\r\n', BODY[:10]
-    return '200 OK', content_type, extra, BODY
+    body = b'globalThis.scriptLoaderFixture = true;' if uri.path == '/downloads/loader.js' else BODY
+    return '200 OK', content_type, extra, body
 
 
 if __name__ == '__main__':

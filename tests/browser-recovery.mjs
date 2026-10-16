@@ -10,7 +10,8 @@ if (!process.env.COMPOSE_FILE) {
   const context=JSON.parse(await readFile('artifacts/sdk-test-context.json'));
   Object.assign(process.env,{COMPOSE_FILE:context.composeFile,COMPOSE_PROJECT_NAME:context.project,COMPOSE_PROFILES:'test',SHIFTER_CREDENTIALS_FILE:new URL('./fixtures/credentials.example.toml',import.meta.url).pathname});
 }
-const host='http://127.0.0.1:8180',api='http://localhost:8180',runtimeOrigin='http://localhost:8181';
+const sameSite=process.argv.includes('--same-site-downloads');
+const host=sameSite?'http://localhost:8180':'http://127.0.0.1:8180',api='http://localhost:8180',runtimeOrigin='http://localhost:8181';
 assert.equal((await fetch(api+'/api/countries').then(r=>r.json())).testMode,true);
 const token=randomBytes(32).toString('hex');
 await docker(['compose','exec','-T','redis','redis-cli','-n','1','SET',`test-captcha:${createHash('sha256').update(token).digest('hex')}`,'127.0.0.1','EX','180']);
@@ -61,7 +62,7 @@ try {
     assert.equal(await page.evaluate(()=>typeof AbortSignal.timeout),'undefined');
     results.push('The SDK reaches API authorization and loads a destination without AbortSignal.any or timeout');
   }
-  console.log('Browser fixture loaded through the cross-site runtime');
+  console.log(`Browser fixture loaded through the ${sameSite?'same-site':'cross-site'} runtime`);
   const destination=()=>page.frames().find(frame=>frame.url().startsWith(runtimeOrigin+'/service/'));
   const runtime=()=>page.frames().find(frame=>frame.url().startsWith(runtimeOrigin+'/index.html'));
   if (process.argv.includes('--mobile-compat')) {
@@ -69,12 +70,16 @@ try {
     assert.equal(await runtime().evaluate(()=>typeof indexedDB.databases),'undefined');
     results.push('Missing Android SharedWorker and IndexedDB enumeration use the dedicated transport and known-database cleanup');
   }
-  if (process.argv.includes('--downloads')) {
+  if (process.argv.includes('--downloads') || sameSite) {
     const {checkDownloads} = await import('./browser-downloads.mjs');
     results.push(...await checkDownloads(browser, page, destination, runtime));
     await page.evaluate(()=>testProxy.navigate('http://fixture.test/'));
     await loaded();
   }
+  if(sameSite) {
+    await page.evaluate(()=>testProxy.stop());
+    for(const result of results)console.log('PASS',result);
+  } else {
   await destination().waitForSelector('#identity');
   // The synthetic SOCKS server cannot serve publicsuffix.org over HTTPS.
   // Cold-profile cross-origin modules must not depend on that network fetch.
@@ -138,6 +143,7 @@ try {
   const mode = ['mobile-compat','legacy-api-compat'].filter(flag=>process.argv.includes('--'+flag));
   await writeFile(`artifacts/browser-recovery${mode.length?'-'+mode.join('-'):''}.json`,JSON.stringify({at:new Date().toISOString(),release,results},null,2));
   for(const result of results)console.log('PASS',result);
+  }
 } catch(error) {
   for(const message of new Set(consoleErrors))console.error(message);
   if(page) console.error(await page.evaluate(()=>({status:window.testProxy?.getState().status,error:window.testProxy?.getState().error,states:window.states,messages:window.messages,requests:performance.getEntriesByType('resource').filter(r=>r.name.includes('/api/v1/')&&!r.name.endsWith('/session')).map(r=>({name:r.name,status:r.responseStatus}))})).catch(()=>({status:'unavailable'})));

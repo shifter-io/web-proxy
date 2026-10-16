@@ -97,7 +97,26 @@ test('inline script filenames remain usable as scripts, but not as navigation',a
   }
 });
 test('missing, generic binary and unknown navigation MIME types fail closed',async()=>{
-  for(const type of ['', 'application/octet-stream','application/unknown','text/csv']) {
-    const response=await worker({headers:{'Content-Type':type}}).fetch();assert.equal(response.status,403,type);
+  for(const type of ['', 'application/octet-stream','application/unknown','text/csv','image/x-unrecognized','audio/x-unrecognized','video/x-unrecognized','image/tiff']) {
+    for(const destination of ['iframe','document']) {
+      const w=worker({headers:{'Content-Type':type}});
+      const response=await w.fetch('navigate',destination);assert.equal(response.status,403,type);
+      assert.deepEqual(w.counts(),{reads:0,cancels:1,calls:1});
+    }
+  }
+});
+test('JavaScript Fetch/XHR loaders work without allowing script downloads',async()=>{
+  for(const type of ['application/javascript','text/javascript; charset=utf-8']) {
+    for(const disposition of ['', 'inline; filename="bundle.js"']) {
+      for(const mode of ['cors','same-origin','no-cors']) {
+        const w=worker({path:'/bundle%2Ejs',headers:{'Content-Type':type,'Content-Disposition':disposition}});
+        const response=await w.fetch(mode,'');assert.equal(response.status,200);await response.body.cancel();
+        assert.equal((await w.fetch('navigate','document')).status,403);
+      }
+    }
+    assert.equal((await worker({path:'/bundle.js',headers:{'Content-Type':type,'Content-Disposition':'attachment; filename="bundle.js"'}}).fetch('cors','')).status,403);
+  }
+  for(const type of ['text/plain','application/octet-stream','application/x-msdownload']) {
+    assert.equal((await worker({path:'/bundle.js',headers:{'Content-Type':type}}).fetch('cors','')).status,403);
   }
 });

@@ -36,17 +36,50 @@ async function checkFetches(destination) {
   assert.equal(fetches.range,403);assert.equal(fetches.binary[0],200);assert.ok(fetches.binary[1]>0);assert.equal(fetches.json,'us');
 }
 
-async function checkDirectPage(browser, url, started, baseline) {
+async function checkScriptLoaders(destination) {
+  const loads=await destination().evaluate(async()=>{
+    const results=[];
+    for(const disposition of ['none','inline','attachment']) {
+      const url='/downloads/loader.js?disposition='+disposition;
+      const response=await fetch(url);
+      results.push([response.status,await response.text()]);
+      results.push(await new Promise((resolve,reject)=>{
+        const xhr=new XMLHttpRequest();xhr.open('GET',url);xhr.timeout=10000;
+        xhr.onload=()=>resolve([xhr.status,xhr.responseText]);
+        xhr.onerror=xhr.ontimeout=()=>reject(Error('Script XHR failed'));xhr.send();
+      }));
+    }
+    return results;
+  });
+  for(const [status,body] of loads.slice(0,4)) {assert.equal(status,200);assert.match(body,/scriptLoaderFixture/);}
+  assert.deepEqual(loads.slice(4),[[403,''],[403,'']]);
+}
+
+async function checkDirectPage(browser, destination, navigate, started, baseline) {
   const direct=await browser.newPage();
   try {
-    const response=await direct.goto(url);
+    const response=await direct.goto(destination().url());
     // Chrome can partition the embedded runtime's worker away from top-level tabs.
     // Without that worker, the server must refuse the raw /service/ path entirely.
     if(!response.fromServiceWorker()) {
+      assert.ok(!process.argv.includes('--same-site-downloads'),'same-site check requires an active worker/transport');
       assert.equal(response.status(),404);assert.doesNotMatch(await response.text(),/Download checks/);
     } else {
+      assert.equal(response.status(),200);await direct.waitForSelector('#ready');
+      assert.equal(await direct.evaluate(()=>window.fixtureScript),true);
       assert.match(response.headers()['content-security-policy'],/sandbox/);
       for(const id of ['attribute','blob','data']) {await direct.click('#'+id);await delay(400);}
+      for(const type of ['image/x-unrecognized','audio/x-unrecognized','video/x-unrecognized','image/tiff']) {
+        await navigate('/downloads/get?disposition=none&type='+encodeURIComponent(type));
+        // Start outside the previous document's CSP sandbox each time.
+        await direct.goto('about:blank');
+        const denied=await direct.goto(destination().url());
+        assert.equal(denied.fromServiceWorker(),true,type);
+        assert.equal(denied.status(),403,type);
+        assert.match(await direct.$eval('body',node=>node.textContent),/Downloads are disabled/);
+        await delay(200);assert.equal(started.length,baseline,type);
+      }
+      await navigate('/downloads');
     }
     assert.equal(started.length,baseline,'direct proxied URLs cannot download');
   } finally {await direct.close();}
@@ -92,6 +125,7 @@ export async function checkDownloads(browser, page, destination, runtime) {
     await navigate('/downloads');
     assert.equal(await destination().evaluate(()=>window.fixtureScript),true);
     await checkFetches(destination);
+    await checkScriptLoaders(destination);
     for(const id of ['attribute','blob','data']) {
       await destination().click('#'+id);await delay(400);
       assert.equal(started.length,baseline,id+' must not create a Chrome download');
@@ -106,7 +140,7 @@ export async function checkDownloads(browser, page, destination, runtime) {
     await navigate('/downloads');
     for(const id of ['attribute','blob','data']) {await destination().click('#'+id);await delay(400);}
     assert.equal(started.length,baseline,'response CSP still blocks after removing iframe sandbox attributes');
-    await checkDirectPage(browser, destination().url(), started, baseline);
+    await checkDirectPage(browser, destination, navigate, started, baseline);
     await destination().evaluate(()=>{const frame=document.createElement('iframe');frame.id='nested';frame.srcdoc='<a id="save" download="nested.txt" href="data:text/plain,nested">Save</a>';document.body.append(frame);});
     const nested=await (await destination().$('#nested')).contentFrame();
     await nested.waitForSelector('#save');await nested.click('#save');await delay(400);
@@ -117,7 +151,10 @@ export async function checkDownloads(browser, page, destination, runtime) {
       `${dangerous.length} executable/archive/script filenames blocked even with text/plain and no attachment header`,
       'Extensionless, redirected, POST, Range, Blob, data URL and download-attribute downloads blocked; ordinary HTML, script, JSON and binary fetch still work',
       'Response CSP blocks downloads after iframe sandbox removal and in nested srcdoc frames; direct proxied URLs are protected or refused'];
-    await writeFile('artifacts/browser-downloads.json',JSON.stringify({chrome:await browser.version(),formats:Object.keys(formats),positiveDownloads:finished.length,proxyDownloads:started.length-baseline,results},null,2));
+    const sameSite=process.argv.includes('--same-site-downloads');
+    if(sameSite)results.push('Active worker and transport verified by direct HTML/script response; four unsupported media types denied on fresh top-level navigation');
+    results.push('JavaScript Fetch and XHR loaders succeed for inline/no disposition and reject attachment responses');
+    await writeFile(`artifacts/browser-downloads${sameSite?'-same-site':''}.json`,JSON.stringify({chrome:await browser.version(),formats:Object.keys(formats),positiveDownloads:finished.length,proxyDownloads:started.length-baseline,results},null,2));
     return results;
   } finally {
     if(control)await control.close();

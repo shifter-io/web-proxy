@@ -37,7 +37,9 @@ self.addEventListener('activate', event => event.waitUntil(self.clients.claim())
 // Headers are checked before Scramjet reads/rewrites a BareMux response body.
 const blockedFile = /\.(?:exe|dll|com|scr|msi|msp|msix|msixbundle|appx|appxbundle|bat|cmd|ps1|vbs|vbe|js|jse|wsf|wsh|hta|cpl|reg|lnk|chm|jar|apk|dmg|pkg|deb|rpm|iso|img|zip|rar|7z|tar|gz|bz2|xz|zst|cab)$/i;
 const blockedMime = /^application\/(?:x-)?(?:msdownload|msdos-program|dosexec|portable-executable|msi|ms-installer|executable|sharedlib|mach-binary|apple-diskimage|apple-installer\+xml|java-archive|vnd\.android\.package-archive|vnd\.microsoft\.portable-executable|vnd\.ms-(?:cab-compressed|download|installer)|zip(?:-compressed)?|rar(?:-compressed)?|vnd\.rar|7z-compressed|tar|gtar|gzip|bzip2?|xz|zstd|compressed|debian-package|vnd\.debian\.binary-package|sh|bat|rpm)$/i;
-const displayMime = /^(?:text\/(?:html|plain|css|javascript|xml)|application\/(?:xhtml\+xml|javascript|json|xml|pdf)|(?:image|audio|video)\/[a-z0-9.+-]+)$/i;
+// Unknown media types can become downloads before a response CSP takes effect.
+// Keep navigation conservative; ordinary media subresource fetches are unaffected.
+const displayMime = /^(?:text\/(?:html|plain|css|javascript|xml)|application\/(?:xhtml\+xml|javascript|json|xml|pdf)|image\/(?:avif|bmp|gif|jpeg|png|svg\+xml|webp|x-icon|vnd\.microsoft\.icon)|audio\/(?:aac|flac|mpeg|mp4|ogg|wav|webm)|video\/(?:mp4|ogg|webm))$/i;
 function downloadable(response, request, url = '') {
   // Redirect targets get their own check; no-body HTTP responses cannot download.
   if ([204,205,301,302,303,304,307,308].includes(response.status)) return false;
@@ -50,8 +52,11 @@ function downloadable(response, request, url = '') {
   for (let name of filenames) {
     try { name = decodeURIComponent(name); } catch { /* Inspect the literal filename if malformed. */ }
     name = name.trim().replace(/[. ]+$/, '');
-    // Inline JavaScript used as a script/worker is an ordinary web asset.
-    if (/\.js$/i.test(name) && ['script','worker','sharedworker'].includes(request.destination)) continue;
+    // Script/worker loads and typed Fetch/XHR script loaders are ordinary assets.
+    // Disposition/MIME denials above still apply, and navigation never qualifies.
+    if (/\.js$/i.test(name) && request.mode !== 'navigate' &&
+        (['script','worker','sharedworker'].includes(request.destination) ||
+         (request.destination === '' && /^(?:text|application)\/javascript$/.test(type)))) continue;
     if (blockedFile.test(name)) return true;
   }
   return request.mode === 'navigate' && !displayMime.test(type);
