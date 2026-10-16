@@ -69,6 +69,12 @@ try {
     assert.equal(await runtime().evaluate(()=>typeof indexedDB.databases),'undefined');
     results.push('Missing Android SharedWorker and IndexedDB enumeration use the dedicated transport and known-database cleanup');
   }
+  if (process.argv.includes('--downloads')) {
+    const {checkDownloads} = await import('./browser-downloads.mjs');
+    results.push(...await checkDownloads(browser, page, destination, runtime));
+    await page.evaluate(()=>testProxy.navigate('http://fixture.test/'));
+    await loaded();
+  }
   await destination().waitForSelector('#identity');
   // The synthetic SOCKS server cannot serve publicsuffix.org over HTTPS.
   // Cold-profile cross-origin modules must not depend on that network fetch.

@@ -189,7 +189,7 @@ export function create({container, apiOrigin, nonce} = {}) {
     runtimeDead = false; heartbeat = false; probe = null;
     frame?.remove(); frame = document.createElement('iframe');
     frame.title = 'Proxied browsing session';
-    frame.setAttribute('sandbox','allow-scripts allow-same-origin allow-forms allow-downloads');
+    frame.setAttribute('sandbox','allow-scripts allow-same-origin allow-forms');
     frame.style.cssText = 'border:0;width:100%;height:100%;display:block';
     const params = new URLSearchParams({parentOrigin:location.origin,channel,protocolVersion:String(protocolVersion)});
     frame.src = `${config.runtimeOrigin}/${runtimeNeedsReset ? 'reset' : 'index'}.html?${params}`;

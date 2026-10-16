@@ -149,6 +149,16 @@ If Google reports a widget error, the SDK keeps its frame and modal open so Goog
 
 Production startup rejects missing credentials and Google's public test credentials. Synthetic tests seed random one-use challenge hashes in private Redis; those records are read only in `APP_ENV=test`. There is no configurable production verifier URL or bypass switch.
 
+### Download restrictions
+
+SDK 1.0.7 and the accompanying hosted runtime disable downloads in both iframe sandbox layers. The service worker checks upstream response headers before Scramjet reads or rewrites the body: attachment/unknown dispositions, executable/archive MIME types and dangerous filenames are denied. Navigation responses must have a supported display MIME type; missing or unknown types are denied. Redirect destinations are checked on their subsequent request. The same policy covers fetch, script/style retries, POST and partial responses. A blocked navigation renders an inert 403 “Downloads are disabled” page; blocked subresources return an empty 403. The worker cancels rejected bodies without waiting for transport cancellation and does not trigger connection recovery for a policy denial.
+
+A CSP sandbox is appended after rewriting every proxied navigation response. It omits download, popup and top-navigation permissions and remains effective if a page removes its iframe sandbox attribute. Normal HTML, scripts, styles, images, JSON, WebAssembly and binary API fetches remain supported, subject to the response policy. This intentionally blocks legitimate attachment downloads too. Browser formats and website compatibility still require testing; a supported MIME type is not a malware verdict.
+
+These are browser-side browsing restrictions, not a guarantee that malware bytes never pass through the relay or that a user cannot save already-received data. The Wisp backend still relays opaque HTTPS connections. Deliberate custom-client abuse and server-side malware inspection require a separate architecture change.
+
+Deploy the updated runtime assets to **every serving region**, along with immutable SDK `1.0.7` assets and the stable `/sdk/v1/shifter-web-proxy.js` loader. The Docker image includes both, so rebuild and redeploy it through the normal release process. Existing stable-URL website integrations need no adapter changes; reload open tabs to pick up the new SDK and runtime worker. Integrations pinned to an immutable older release must update their pin. Publishing only the SDK does not install response filtering. Historical releases remain unchanged for rollback; rolling back these components can restore download capability.
+
 ### Release and rollback
 
 Maintain source only under `web/sdk/src/`. `node scripts/build-sdk.mjs 1.0.4` creates/verifies immutable files and a SHA-256 manifest in `web/sdk/releases/1.0.4/`. With no argument, the script verifies the release selected by the loader. It rejects changed content for an existing version. To release an update, pass a new semantic version and change `RELEASE` in `web/sdk/v1/shifter-web-proxy.js` after validating that release.
@@ -655,11 +665,13 @@ npm test
 cargo test
 node scripts/build-sdk.mjs
 docker build -t shifter-web:sdk-check .
-node tests/run-sdk-tests.mjs --browser --mobile-compat --legacy-api-compat  # Requires local Chrome; omit browser flags for backend checks only
+node tests/run-sdk-tests.mjs --browser --downloads --mobile-compat --legacy-api-compat  # Requires local Chrome; omit browser flags for backend checks only
 HTTPS_TEST_IMAGE=shifter-web:sdk-check HTTPS_TEST_REDIS_TLS=1 node tests/https-deployment.mjs
 ```
 
 The SDK runner creates a separate disposable local project on loopback ports 8180/8181, runs the origin/CAPTCHA/identity/cache checks, transport/quota integration tests, stream admission checks, and Redis network-policy checks, then removes that project. It never rewrites the developer's active configuration. `--browser` additionally exercises a forced Chrome renderer crash and cross-origin navigation recovery before cleanup. `--keep` retains it for further browser checks and writes its cleanup context under ignored `artifacts/`.
+
+`--downloads` also runs real Chrome download checks against harmless local fixtures. An unsandboxed localhost control must save every format before the proxy checks run; the harness allows downloads and records Chrome download events. Checks cover attachments, mislabelled executable/archive URLs, extensionless files, redirects, POST, Range, download attributes, Blob/data URLs, nested srcdoc frames, direct proxied URLs and removal of both iframe sandbox attributes. Bodies are inert text regardless of their filename or MIME label, not real executable or media samples. Download files, fixture servers and the disposable browser profile are removed after the run. Results are recorded under ignored `artifacts/`.
 
 Recovery tests cover hidden error documents, worker capability validation, website HTTP-error passthrough, POST safety, stale frames, retry limits, Stop/destruction cancellation, gateway-attested SID rotation, concurrent recovery, and unchanged quota/expiry. The TLS fixture also exercises recovery under the production Redis ACL and verifies that storage loss denies recovery. Unit runtime tests use a simulated DOM/service-worker bridge. `node tests/browser-recovery.mjs` also runs local system Chrome in a disposable profile against the stack kept by `tests/run-sdk-tests.mjs --keep`: it crashes the cross-site runtime renderer with CDP, verifies automatic recovery and persisted state, and exercises the worker error document under a cross-origin embed. It never opens the person’s normal browser profile.
 

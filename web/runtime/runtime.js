@@ -54,7 +54,7 @@
           await runtimeDeadline(() => connection.setTransport('/vendor/libcurl/index.mjs',[{websocket}]), 'The browser transport did not start. Select Reload to try again.');
           if (version !== commandVersion) return;
           frame = scramjet.createFrame();
-          frame.frame.setAttribute('sandbox','allow-scripts allow-same-origin allow-forms allow-downloads');
+          frame.frame.setAttribute('sandbox','allow-scripts allow-same-origin allow-forms');
           frame.frame.title = 'Destination website';
           const currentFrame = frame;
           let navigation = 0;
