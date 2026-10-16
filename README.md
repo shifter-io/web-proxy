@@ -54,7 +54,7 @@ Shifter Web Proxy puts those checks in a browser page: choose a location, open a
 | **Embeddable JavaScript SDK** | Add the browsing experience to an authorized website with your own controls. |
 | **Inspectable implementation** | Review the Rust services, session enforcement, and browser integration. |
 
-The default free allowance is **up to 30 minutes and 100 MiB per day**. Website compatibility varies; the proxy does not guarantee access to every destination or support for every sign-in, video, or download flow.
+The default free allowance is **up to 30 minutes and 100 MiB per day**. File downloads are disabled in the browsing interface. Website compatibility varies; the proxy does not guarantee access to every destination or support for every sign-in or video flow.
 
 ## How to use the online proxy
 

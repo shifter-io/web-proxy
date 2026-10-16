@@ -52,7 +52,7 @@ try {
   await command('node',['tests/integration.mjs']);
   await command('node',['tests/limits.mjs']);
   await command('node',['tests/configuration.mjs']);
-  if(process.argv.includes('--browser')) await command('node',['tests/browser-recovery.mjs']);
+  if(process.argv.includes('--browser') || process.argv.includes('--downloads')) await command('node',['tests/browser-recovery.mjs',...(process.argv.includes('--downloads')?['--downloads']:[])]);
   if(process.argv.includes('--mobile-compat')) await command('node',['tests/browser-recovery.mjs','--mobile-compat']);
   if(process.argv.includes('--legacy-api-compat')) await command('node',['tests/browser-recovery.mjs','--legacy-api-compat']);
   success=true;

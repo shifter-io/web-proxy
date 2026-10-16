@@ -1,6 +1,7 @@
 """Bounded synthetic SOCKS5 upstream and HTTP website; never connects to the Internet."""
 import asyncio, hashlib, json, re
 from urllib.parse import urlsplit, parse_qs
+from downloads import response as download_response
 
 PAGE = '''<!doctype html><html><head><script>window.transitionFallback = !('startViewTransition' in document) && !('startViewTransition' in document.documentElement);</script><title>Shifter fixture</title></head><body style="font:18px system-ui;padding:32px;background:#f3f8eb;color:#234">
 <h1>Proxy test destination</h1><p id="identity">COUNTRY / SID</p>
@@ -53,7 +54,9 @@ async def handle(reader, writer):
             body=b''.join(chunks)
         uri=urlsplit(path); extra=''; code='200 OK'; content_type='text/html; charset=utf-8'
         identity={'country':country,'sid':sid,'ip':'198.51.100.'+str(int(hashlib.sha256(sid.encode()).hexdigest()[:2],16)), 'host':headers.get('host','')}
-        if uri.path in ['/api','/ip']:
+        if uri.path.startswith('/downloads'):
+            code, content_type, extra, payload = download_response(path, headers)
+        elif uri.path in ['/api','/ip']:
             payload=json.dumps(identity).encode();content_type='application/json'
         elif uri.path=='/echo' and method=='POST':
             payload=body;content_type='application/octet-stream'
