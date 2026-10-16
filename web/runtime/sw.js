@@ -61,10 +61,43 @@ function cancelDownload(response) {
   try { void response.body?.cancel().catch(() => {}); } catch { /* Already locked/closed. */ }
 }
 function downloadDenied(request) {
-  const page = '<!doctype html><meta charset="utf-8"><title>Downloads disabled</title><h1>Downloads are disabled</h1><p>This proxy supports browsing only. File downloads are not available.</p>';
+  const page = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark"><title>Downloads disabled · Shifter Web Proxy</title>
+<style>
+*{box-sizing:border-box}html{color-scheme:dark;background:#090b13}
+body{margin:0;min-height:100vh;min-height:100svh;display:grid;place-items:center;padding:32px 20px;color:#f5f6fa;font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(ellipse at 50% 15%,#182b483d,transparent 65%)}
+main{width:100%;max-width:560px;padding:36px;border:1px solid #ffffff14;border-radius:20px;background:linear-gradient(145deg,#141b2a,#0e131e);box-shadow:0 24px 80px #0003}
+.brand{display:flex;align-items:center;gap:9px;color:#aab5c8;font-size:11px;font-weight:650;letter-spacing:1.8px}
+.brand span{width:7px;height:7px;border-radius:50%;background:#5ba3ff}
+.symbol{display:grid;place-items:center;width:56px;height:56px;margin:28px 0 20px;border:1px solid #5ba3ff30;border-radius:16px;background:#2b7fff12;color:#79b3ff}
+.symbol svg{width:28px;height:28px}h1{margin:0;font-size:32px;line-height:1.2;letter-spacing:-1px;font-weight:650}
+.intro{margin:12px 0 24px;color:#aab4c6;font-size:16px}
+.reason{padding:18px 20px;border:1px solid #ffffff0b;border-radius:12px;background:#ffffff03}
+h2{margin:0 0 8px;font-size:13px;line-height:1.5;color:#e4e9f2;font-weight:650}
+.reason p{margin:0;color:#b3bdcf;font-size:14px;line-height:1.75}.reason strong{font-weight:600;color:#dce5f7}
+.policy{margin:12px 0 0;color:#8e9bb1;font-size:12px}
+.continue{display:flex;align-items:flex-start;gap:12px;margin-top:26px;padding-top:24px;border-top:1px solid #ffffff0c}
+.continue svg{width:18px;height:18px;flex-shrink:0;margin-top:3px;color:#79b3ff}
+.continue h2{margin:0 0 4px}.continue p{margin:0;color:#9eabc0;font-size:13px;line-height:1.65}
+@media(max-width:480px){body{padding:20px 14px}main{padding:26px 22px;border-radius:16px}h1{font-size:28px;letter-spacing:-.7px}.intro{font-size:15px}.reason{padding:16px}.symbol{margin-top:24px}}
+@media(max-height:520px) and (min-width:481px){body{padding:16px}main{padding:24px}.symbol{margin:16px 0;width:44px;height:44px}.intro{margin-bottom:16px}.continue{margin-top:18px;padding-top:16px}}
+</style></head><body>
+<main aria-labelledby="notice-title">
+<div class="brand"><span aria-hidden="true"></span>SHIFTER WEB PROXY</div>
+<div class="symbol" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v5c0 5 4.5 8 8 10 3.5-2 8-5 8-10V6z"/><path d="M12 8v5m-2-2 2 2 2-2M9 16h6"/></svg></div>
+<h1 id="notice-title">Downloads are disabled</h1>
+<p class="intro">This free proxy is for browsing websites only.</p>
+<section class="reason" aria-labelledby="reason-title">
+<h2 id="reason-title">Why this restriction?</h2>
+<p>We’ve disabled file downloads following abuse of our service to download malware. This misuse violates our <strong>Terms of Service</strong>.</p>
+</section>
+<p class="policy">This restriction applies to all files.</p>
+<div class="continue"><svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m10 6-6 6 6 6m-6-6h16"/></svg><div><h2>You can keep browsing</h2><p>Use the proxy’s Back button or enter another website.</p></div></div>
+</main></body></html>`;
   return Object.assign(new Response(request.mode === 'navigate' ? page : null, {
     status:403, headers:{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store',
-      'X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'none'; sandbox allow-same-origin"},
+      'X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'none'; style-src 'unsafe-inline'; sandbox allow-same-origin"},
   }), {downloadBlocked:true});
 }
 async function protectedFetch(engine, event) {
