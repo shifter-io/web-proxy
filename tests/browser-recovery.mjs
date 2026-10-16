@@ -14,7 +14,7 @@ const sameSite=process.argv.includes('--same-site-downloads');
 const host=sameSite?'http://localhost:8180':'http://127.0.0.1:8180',api='http://localhost:8180',runtimeOrigin='http://localhost:8181';
 assert.equal((await fetch(api+'/api/countries').then(r=>r.json())).testMode,true);
 const token=randomBytes(32).toString('hex');
-await docker(['compose','exec','-T','redis','redis-cli','-n','1','SET',`test-captcha:${createHash('sha256').update(token).digest('hex')}`,'127.0.0.1','EX','180']);
+await docker(['compose','exec','-T','redis','redis-cli','-n','1','SET',`test-captcha:${createHash('sha256').update(token).digest('hex')}`,new URL(host).hostname,'EX','180']);
 const loader=await readFile(new URL('../web/sdk/v1/shifter-web-proxy.js',import.meta.url),'utf8');
 const release=loader.match(/const RELEASE = '(\d+\.\d+\.\d+)'/)[1];
 const browser=await puppeteer.launch({channel:'chrome',headless:true,args:['--site-per-process']});

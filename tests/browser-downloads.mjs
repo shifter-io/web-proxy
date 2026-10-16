@@ -56,7 +56,7 @@ async function checkScriptLoaders(destination) {
 }
 
 async function checkDirectPage(browser, destination, navigate, started, baseline) {
-  const direct=await browser.newPage();
+  let direct=await browser.newPage();
   try {
     const response=await direct.goto(destination().url());
     // Chrome can partition the embedded runtime's worker away from top-level tabs.
@@ -71,8 +71,8 @@ async function checkDirectPage(browser, destination, navigate, started, baseline
       for(const id of ['attribute','blob','data']) {await direct.click('#'+id);await delay(400);}
       for(const type of ['image/x-unrecognized','audio/x-unrecognized','video/x-unrecognized','image/tiff']) {
         await navigate('/downloads/get?disposition=none&type='+encodeURIComponent(type));
-        // Start outside the previous document's CSP sandbox each time.
-        await direct.goto('about:blank');
+        // A fresh tab has no prior document whose sandbox could mask a bypass.
+        await direct.close();direct=await browser.newPage();
         const denied=await direct.goto(destination().url());
         assert.equal(denied.fromServiceWorker(),true,type);
         assert.equal(denied.status(),403,type);
