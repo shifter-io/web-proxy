@@ -2,9 +2,11 @@ import {initShifterReveals} from './shifter-reveal.js';
 import {renderCountryOrbits} from './country-orbits.js';
 import {renderCountryMarquee} from './country-marquee.js';
 import {CountryPicker} from './country-picker.js';
+import {LoadingSlider} from './loading-slider.js';
 initShifterReveals();
 const $ = id => document.getElementById(id);
 const countryPicker = new CountryPicker();
+const loadingSlider = new LoadingSlider($('loading-slider'));
 const proxy = ShifterWebProxy.create({container:$('runtime-host'), ...(window.SHIFTER_API_ORIGIN ? {apiOrigin:window.SHIFTER_API_ORIGIN} : {})});
 let current = proxy.getState(), configured = false, landingScroll = 0, countriesLoaded = false, loading = false;
 function notice(text = '') { $('notice').textContent = text; $('notice').hidden = !text; }
@@ -48,6 +50,7 @@ proxy.subscribe(state => {
   if (state.loading !== loading) {
     loading = state.loading;
     $('page-loading').hidden = !loading;
+    if (loading) loadingSlider.start(); else loadingSlider.stop();
     $('viewport').setAttribute('aria-busy', String(loading));
   }
   notice(state.error?.message || (state.persistent === false ? 'Browser storage is unavailable. Your session will not be remembered after this page closes.' : ''));

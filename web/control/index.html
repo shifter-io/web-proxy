@@ -85,10 +85,13 @@
       </section>
       <p id="notice" role="alert" hidden></p>
       <div id="viewport" class="browser-only">
-        <div id="page-loading" class="page-loading" role="status" hidden>
-          <img class="loading-logo" src="/assets/shifter-logo.svg" alt="Shifter" width="156" height="42">
-          <p aria-hidden="true">Loading<span class="loading-dots"><span>.</span><span>.</span><span>.</span></span></p>
-          <span class="sr-only">Loading your website. Please wait.</span>
+        <div id="page-loading" class="page-loading" hidden>
+          <div class="loading-head">
+            <img class="loading-logo" src="/assets/shifter-logo.svg" alt="Shifter" width="156" height="42">
+            <p aria-hidden="true"><span class="loading-spinner"></span>Loading your website</p>
+            <span class="sr-only" role="status">Loading your website. Please wait.</span>
+          </div>
+          <section id="loading-slider" class="loading-slider" aria-roledescription="carousel" aria-label="Shifter products"></section>
         </div>
         <div id="empty" class="viewport-message"><svg class="icon"><use href="#globe"/></svg><h2>Preparing your destination</h2><p>Your website will appear here.</p></div>
         <div id="runtime-host" hidden></div>

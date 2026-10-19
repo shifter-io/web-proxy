@@ -52,6 +52,7 @@ fn public_path(kind: Kind, path: &str) -> Option<&str> {
                     | "country-marquee.js"
                     | "country-picker.js"
                     | "page-loading.js"
+                    | "loading-slider.js"
                     | "shifter-reveal.js"
                     | "assets/favicon.svg"
                     | "assets/shifter-logo.svg"
@@ -160,6 +161,7 @@ mod tests {
         for file in [
             "control/index.html",
             "control/app.js",
+            "control/loading-slider.js",
             "control/.env.captcha",
             "control/.secrets/key",
             "control/app.js.bak",
@@ -182,6 +184,7 @@ mod tests {
             "/",
             "/index.html",
             "/app.js?cache=1",
+            "/loading-slider.js",
             "/sdk/releases/1.0.0/client.js",
         ] {
             for method in [Method::GET, Method::HEAD] {
