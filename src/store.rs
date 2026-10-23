@@ -72,7 +72,7 @@ impl Store {
     }
     pub async fn get(&self, key: &str) -> Result<Option<Session>> {
         let h: HashMap<String, String> = allowance_script(
-            "renew(KEYS[1], tonumber(ARGV[1])); return redis.call('HGETALL',KEYS[1])",
+            "if identity_alive(KEYS[1], tonumber(ARGV[1]), true) then renew(KEYS[1], tonumber(ARGV[1])) end; return redis.call('HGETALL',KEYS[1])",
         )
         .key(key)
         .arg(now_ms())
@@ -114,6 +114,25 @@ impl Store {
             .invoke_async(&mut self.db.clone())
             .await?;
         self.get(&key).await
+    }
+    /// Bind verified SDK identity to forwarding; never recreate an expired identity.
+    pub async fn bind_identity(&self, session: &Session, identity: &str) -> Result<bool> {
+        let ok: i64 = Script::new(
+            r#"
+            if redis.call('EXISTS',KEYS[1])==0 or redis.call('EXISTS',KEYS[2])==0 then return 0 end
+            local bound=redis.call('HGET',KEYS[1],'identity')
+            if bound and bound~=KEYS[2] then return 0 end
+            redis.call('HSET',KEYS[1],'identity',KEYS[2])
+            redis.call('PEXPIREAT',KEYS[2],ARGV[1])
+            return 1
+        "#,
+        )
+        .key(&session.key)
+        .key(identity)
+        .arg(now_ms() + 30 * 86_400_000)
+        .invoke_async(&mut self.db.clone())
+        .await?;
+        Ok(ok == 1)
     }
     pub async fn start(&self, visitor: &str, country: &str, cfg: &Config) -> Result<Session> {
         let key = Self::key(visitor);
@@ -219,6 +238,7 @@ impl Store {
         let ok: i64 = allowance_script(r#"
             if redis.call('HGET',KEYS[1],'rev')~=ARGV[1]
               or redis.call('HGET',KEYS[1],'stopped')~='0' then return 0 end
+            if not identity_alive(KEYS[1], tonumber(ARGV[2]), false) then return 0 end
             renew(KEYS[1], tonumber(ARGV[2]))
             if tonumber(redis.call('HGET',KEYS[1],'exp'))<=tonumber(ARGV[2])
               or tonumber(redis.call('HGET',KEYS[1],'used'))>=tonumber(redis.call('HGET',KEYS[1],'limit')) then return 0 end
@@ -246,6 +266,7 @@ impl Store {
             serde_json::from_str(&raw.ok_or_else(|| anyhow::anyhow!("invalid ticket"))?)?;
         let ok:i64=allowance_script(r#"
             if redis.call('HGET',KEYS[1],'rev')~=ARGV[1] or redis.call('HGET',KEYS[1],'stopped')~='0' then return 0 end
+            if not identity_alive(KEYS[1], tonumber(ARGV[2]), true) then return 0 end
             renew(KEYS[1], tonumber(ARGV[2]))
             if tonumber(redis.call('HGET',KEYS[1],'exp'))<=tonumber(ARGV[2]) then return 0 end
             if tonumber(redis.call('HGET',KEYS[1],'used'))>=tonumber(redis.call('HGET',KEYS[1],'limit')) then return 0 end
@@ -264,6 +285,7 @@ impl Store {
         let ok:i64=allowance_script(r#"
             if redis.call('HGET',KEYS[1],'rev')~=ARGV[1] or redis.call('HGET',KEYS[1],'owner')~=ARGV[2]
               or redis.call('HGET',KEYS[1],'stopped')~='0' then return 0 end
+            if not identity_alive(KEYS[1], tonumber(ARGV[3]), true) then return 0 end
             renew(KEYS[1], tonumber(ARGV[3]))
             if tonumber(redis.call('HGET',KEYS[1],'exp'))<=tonumber(ARGV[3])
               or tonumber(redis.call('HGET',KEYS[1],'lease_until') or '0')<=tonumber(ARGV[3]) then return 0 end
@@ -292,6 +314,7 @@ impl Store {
         let allowed:i64=allowance_script(r#"
             if redis.call('HGET',KEYS[1],'rev')~=ARGV[1] or redis.call('HGET',KEYS[1],'owner')~=ARGV[2]
               or redis.call('HGET',KEYS[1],'stopped')~='0' then return 0 end
+            if not identity_alive(KEYS[1], tonumber(ARGV[3]), false) then return 0 end
             renew(KEYS[1], tonumber(ARGV[3]))
             if tonumber(redis.call('HGET',KEYS[1],'exp'))<=tonumber(ARGV[3])
               or tonumber(redis.call('HGET',KEYS[1],'lease_until') or '0')<=tonumber(ARGV[3]) then return 0 end
@@ -314,6 +337,7 @@ impl Store {
             if redis.call('HGET',KEYS[1],'owner')~=ARGV[1]
               or redis.call('HGET',KEYS[1],'rev')~=ARGV[5]
               or redis.call('HGET',KEYS[1],'stopped')~='0' then return 0 end
+            if not identity_alive(KEYS[1], tonumber(ARGV[2]), false) then return 0 end
             renew(KEYS[1], tonumber(ARGV[2]))
             local now=tonumber(ARGV[2])
             if tonumber(redis.call('HGET',KEYS[1],'exp') or '0')<=now

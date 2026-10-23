@@ -70,7 +70,10 @@ export function create({container, apiOrigin, nonce} = {}) {
     }
     ensure();
     if (!response.ok) {
-      if (response.status === 401) { credential = undefined; try { localStorage.removeItem(storageKey); } catch {} }
+      if (response.status === 401) {
+        credential = undefined; try { localStorage.removeItem(storageKey); } catch {}
+        if (state.active) expire('stopped');
+      }
       const transient = [502,503,504].includes(response.status) && !data.code;
       if (transient && (method === 'GET' || path === 'session/tickets') && attempt < 2) {
         await delay(500 * 2 ** attempt, controller.signal);

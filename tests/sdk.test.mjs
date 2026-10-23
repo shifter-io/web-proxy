@@ -588,3 +588,17 @@ test('auto-renew never bypasses server traffic exhaustion',async t=>{
   assert.equal(e.proxy.getState().status,'exhausted');
   assert.equal(e.proxy.getState().active,false);
 });
+
+for (const action of ['status', 'stop']) test(`identity loss during ${action} tears down forwarding locally`,async t=>{
+  t.mock.timers.enable({apis:['setTimeout','setInterval','Date'],now:Date.now()});
+  const e=environment(t);await e.start();
+  const original=document.querySelector('#view iframe');
+  t.mock.method(globalThis,'fetch',async()=>({ok:false,status:401,json:async()=>({code:'AUTH_REQUIRED',error:'Start a browsing session'})}));
+  if (action === 'stop') await assert.rejects(e.proxy.stop(),{code:'AUTH_REQUIRED'});
+  else { t.mock.timers.tick(1500);await flush(); }
+  assert.equal(e.proxy.getState().active,false);
+  assert.equal(original.isConnected,false);
+  assert.equal(localStorage.length,0);
+  e.runtimeMessage('cleared');await flush();
+  assert.equal(document.querySelector('iframe'),null);
+});

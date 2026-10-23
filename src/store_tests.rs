@@ -260,3 +260,88 @@ async fn migration_preserves_usage_and_stop_and_revokes_legacy_tickets() -> Resu
     }
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires isolated REDIS_TEST_URL"]
+async fn identity_activity_extends_management_without_resetting_quota() -> Result<()> {
+    let (store, _, _, session) = fixture().await?;
+    let identity = format!("identity:{}", random_id());
+    let _: () = store.db.clone().set_ex(&identity, "verified", 30).await?;
+    assert!(store.bind_identity(&session, &identity).await?);
+    let live = connected(&store, &session).await?;
+    assert_eq!(store.charge(&live, "owner", 123).await?, 123);
+    let _: bool = store.db.clone().pexpire(&identity, 1000).await?;
+    assert!(store.heartbeat(&live, "owner").await?);
+    let ttl: i64 = store.db.clone().pttl(&identity).await?;
+    assert!(ttl > 29 * 86_400_000);
+    let _: bool = store.db.clone().pexpire(&identity, 1000).await?;
+    let current = store.get(&live.key).await?.unwrap();
+    assert_eq!(current.used, 123);
+    assert_eq!(current.expires_at, session.expires_at);
+    let ttl: i64 = store.db.clone().pttl(&identity).await?;
+    assert!(ttl > 29 * 86_400_000);
+    assert!(
+        store
+            .recover(&current, current.revision, "example.com", false)
+            .await?
+    );
+    store.change(&current, None).await?;
+    assert!(!store.heartbeat(&current, "owner").await?);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires isolated REDIS_TEST_URL"]
+async fn lost_identity_revokes_all_gateway_paths_and_is_never_recreated() -> Result<()> {
+    for action in 0..5 {
+        let (store, _, _, session) = fixture().await?;
+        let identity = format!("identity:{}", random_id());
+        assert!(!store.bind_identity(&session, &identity).await?);
+        let _: () = store.db.clone().set_ex(&identity, "verified", 30).await?;
+        assert!(store.bind_identity(&session, &identity).await?);
+        let ticket = store.ticket(&session).await?;
+        let live = connected(&store, &session).await?;
+        let _: bool = store.db.clone().pexpire(&identity, 1).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        fields(&store, &live.key, &[("exp", now_ms() - 1), ("used", 123)]).await?;
+        match action {
+            0 => assert_eq!(store.charge(&live, "owner", 1).await?, 0),
+            1 => assert!(!store.heartbeat(&live, "owner").await?),
+            2 => assert!(!store.stream_token(&live, "owner", 32, 64).await?),
+            3 => assert!(store.claim(&ticket, "other").await.is_err()),
+            _ => assert!(
+                !store
+                    .recover(&live, live.revision, "example.com", false)
+                    .await?
+            ),
+        }
+        assert!(!store.bind_identity(&live, &identity).await?);
+        let stopped = store.get(&live.key).await?.unwrap();
+        assert!(stopped.stopped);
+        assert_eq!(stopped.used, 123);
+        assert!(stopped.revision > live.revision);
+        let exists: bool = store.db.clone().exists(&identity).await?;
+        assert!(!exists);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires isolated REDIS_TEST_URL"]
+async fn identity_expiry_revokes_renewed_forwarding() -> Result<()> {
+    let (store, _, _, session) = fixture().await?;
+    let identity = format!("identity:{}", random_id());
+    let _: () = store.db.clone().set_ex(&identity, "verified", 30).await?;
+    let _: () = store
+        .db
+        .clone()
+        .hset(&session.key, "identity", &identity)
+        .await?;
+    let live = connected(&store, &session).await?;
+    let _: bool = store.db.clone().pexpire(&identity, 1).await?;
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    fields(&store, &live.key, &[("exp", now_ms() - 1), ("used", 123)]).await?;
+    assert_eq!(store.charge(&live, "owner", 1).await?, 0);
+    assert!(store.get(&live.key).await?.unwrap().stopped);
+    Ok(())
+}

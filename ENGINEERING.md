@@ -463,7 +463,7 @@ These requirements follow the [Redis security guidance](https://redis.io/docs/la
 
 ### Identity and daily allowance
 
-The SDK persists a server-generated 256-bit opaque credential in the embedding website's first-party local storage, scoped to API origin and website ID. Redis stores only its SHA-256 hash and an anonymous visitor/site mapping, with a 30-day expiry refreshed only after successful CAPTCHA-backed session creation. Requests omit cookies. The runtime receives only one-use tickets, never the persistent credential. Allowance session keys include both website ID and visitor ID.
+The SDK persists a server-generated 256-bit opaque credential in the embedding website's first-party local storage, scoped to API origin and website ID. Redis stores only its SHA-256 hash and an anonymous visitor/site mapping, with a 30-day inactivity expiry refreshed by verified session creation, authenticated session reads and the active gateway lease. A renewing SDK session binds that identity to gateway authorization: missing or expired identities revoke forwarding rather than being recreated by a stale bearer token. An API 401 also tears down the browser runtime, including when Stop was requested. Requests omit cookies. The runtime receives only one-use tickets, never the persistent credential. Allowance session keys include both website ID and visitor ID.
 
 Deleting storage or changing browser profiles can obtain another anonymous identity after CAPTCHA. This is not an unresettable per-person quota. Scripts trusted by the embedding website can access its storage, so that website's XSS protections remain important. A stopped session retains its credential and allowance. Legacy `shifter_dev` cookies are accepted only in `APP_ENV=test`.
 
@@ -473,7 +473,7 @@ The daily allowance is shared across streams and replicas. Reconnects, country c
 
 Session keys use `daily:<site>:<visitor>:rolling`. On first access after upgrading, an existing record for the current UTC day migrates once into a fresh 24-hour period with the new limit, preserving already-consumed bytes and explicit Stop. Old authorization is revoked in the same transaction. Deploy all API/gateway instances together and refresh open tabs; the migration may reconnect old transports. New periods thereafter preserve healthy transports. Existing environment/Compose overrides must explicitly change to `SESSION_SECONDS=86400` and `BYTE_LIMIT=10000000000`; editing examples alone does not change an active deployment.
 
-SDK 1.0.8 uses the additive `autoRenew` session field. At a zero countdown it keeps the runtime and polls for the authoritative next boundary; it never grants traffic locally. Legacy sessions without this field retain hard expiry. The UI displays HH:MM:SS and decimal GB. Stable-loader integrations update on page reload; pinned/copied releases need updating. The upstream `ttl-1800` sticky-IP setting is independent and unchanged: continuous browsing does not promise one residential IP for 24 hours.
+SDK 1.0.9 uses the additive `autoRenew` session field. At a zero countdown it keeps the runtime and polls for the authoritative next boundary; it never grants traffic locally. Legacy sessions without this field retain hard expiry. The UI displays HH:MM:SS and decimal GB. Stable-loader integrations update on page reload; pinned/copied releases need updating. The upstream `ttl-1800` sticky-IP setting is independent and unchanged: continuous browsing does not promise one residential IP for 24 hours.
 
 ### Connection authorization
 
@@ -566,7 +566,7 @@ The reserved `fixture.test`, `second.test`, and `failed-upstream.test` mappings 
 
 ## HAProxy, regions, and recovery
 
-Local HAProxy runs in TCP mode; the production example terminates HTTPS in HTTP mode. Both use `leastconn`, backend health checks, Docker DNS resolution, and an eleven-minute connection/tunnel idle timeout. A gateway sends periodic WebSocket pings. Backend allowance enforcement still ends browsing at its own shorter session deadline.
+Local HAProxy runs in TCP mode; the production example terminates HTTPS in HTTP mode. Both use `leastconn`, backend health checks, Docker DNS resolution, and an eleven-minute connection/tunnel idle timeout. A gateway sends periodic WebSocket pings. Backend enforcement renews the allowance period without disconnecting healthy transports and denies access on traffic exhaustion, Stop, identity loss or invalid authorization.
 
 **HAProxy balances connections, not individual requests inside a Wisp connection.** An established WebSocket remains attached to one replica. Independent visitors and later reconnects may select different replicas.
 
@@ -602,7 +602,7 @@ node tests/load.mjs
 node tests/failover.mjs
 node --test tests/redis-network-policy.test.mjs
 node tests/configuration.mjs
-sh tests/allowance-redis.sh  # Disposable Redis Unix socket; no published ports
+sh tests/allowance-redis.sh  # Linux Docker: private Redis Unix socket; no published ports
 cargo test --locked
 cargo clippy --all-targets -- -D warnings
 npm audit --audit-level=high
