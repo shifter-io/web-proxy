@@ -289,7 +289,8 @@ export function create({container, apiOrigin, nonce} = {}) {
     if (!state.active || !state.session) return;
     const seconds = Math.max(0, Math.ceil((state.session.expiresAt-Date.now()-(state.clockOffset || 0))/1000));
     if (state.remainingSeconds !== seconds) emit({remainingSeconds:seconds});
-    if (!seconds) expire('expired');
+    // Renewal is authoritative on the server; keep the page while status refreshes.
+    if (!seconds && !state.session.autoRenew) expire('expired');
   }, 250);
   async function operation(fn) {
     ensure();

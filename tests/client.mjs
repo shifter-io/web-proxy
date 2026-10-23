@@ -6,7 +6,7 @@ export const runtime = process.env.RUNTIME_ORIGIN || 'http://localhost:8081';
 export const sleep = ms => new Promise(resolve => setTimeout(resolve,ms));
 export class Visitor {
   constructor() { this.cookie = `shifter_dev=${randomBytes(16).toString('hex')}`; }
-  get key() { return `daily:${this.cookie.split('=')[1]}:${Math.floor(Date.now()/86400000)}`; }
+  get key() { return `daily:${this.cookie.split('=')[1]}:rolling`; }
   async api(path, method='GET', body, expected=200) {
     const response = await fetch(`${origin}/api/${path}`, { method,
       headers:{Origin:origin,Cookie:this.cookie,...(body?{'Content-Type':'application/json'}:{})},

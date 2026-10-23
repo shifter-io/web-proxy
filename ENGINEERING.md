@@ -303,8 +303,8 @@ Edit the ignored `.env` file:
 ```dotenv
 SHIFTER_CREDENTIALS_FILE=./.secrets/shifter.toml
 SHIFTER_REGION=blr
-SESSION_SECONDS=1800
-BYTE_LIMIT=104857600
+SESSION_SECONDS=86400
+BYTE_LIMIT=10000000000
 ```
 
 Then start live development mode:
@@ -379,8 +379,8 @@ The example Compose environment supplies the following defaults. Customize the i
 | --- | --- | --- |
 | `SHIFTER_CREDENTIALS_FILE` | Mock fixture path in the example | Host-side path mounted as the live gateway secret |
 | `SHIFTER_REGION` | `blr` | Explicit Shifter ingress region |
-| `SESSION_SECONDS` | `1800` | Daily browsing window, maximum 1800 seconds (30 minutes) |
-| `BYTE_LIMIT` | `104857600` | 100 MiB combined destination payload per UTC day |
+| `SESSION_SECONDS` | `86400` | Automatically renewing allowance period, 1–86400 seconds; use 86400 in production |
+| `BYTE_LIMIT` | `10000000000` | 10 GB (decimal) combined destination payload per allowance period |
 | `MAX_STREAMS` | `64` | Concurrent destination streams per Wisp connection; configuration maximum 128 |
 | `STREAM_RATE` | `32` | New destination streams per second |
 | `STREAM_BURST` | `64` | Redis token-bucket burst size |
@@ -463,13 +463,17 @@ These requirements follow the [Redis security guidance](https://redis.io/docs/la
 
 ### Identity and daily allowance
 
-The SDK persists a server-generated 256-bit opaque credential in the embedding website's first-party local storage, scoped to API origin and website ID. Redis stores only its SHA-256 hash and an anonymous visitor/site mapping, with a 30-day expiry refreshed only after successful CAPTCHA-backed session creation. Requests omit cookies. The runtime receives only one-use tickets, never the persistent credential. Daily session keys include both website ID and visitor ID.
+The SDK persists a server-generated 256-bit opaque credential in the embedding website's first-party local storage, scoped to API origin and website ID. Redis stores only its SHA-256 hash and an anonymous visitor/site mapping, with a 30-day expiry refreshed only after successful CAPTCHA-backed session creation. Requests omit cookies. The runtime receives only one-use tickets, never the persistent credential. Allowance session keys include both website ID and visitor ID.
 
 Deleting storage or changing browser profiles can obtain another anonymous identity after CAPTCHA. This is not an unresettable per-person quota. Scripts trusted by the embedding website can access its storage, so that website's XSS protections remain important. A stopped session retains its credential and allowance. Legacy `shifter_dev` cookies are accepted only in `APP_ENV=test`.
 
-On first session creation, Redis records the visitor’s country, SID, region, expiry, byte usage, limit, revision, and stopped state. The browsing window starts immediately, including time spent idle or stopped. Its expiry is the earlier of the configured duration and the next UTC midnight.
+On first session creation, Redis records the visitor’s country, SID, region, expiry, byte usage, limit, revision, and stopped state. The browsing window starts immediately, including time spent idle or stopped. The default period is a full 24 hours from creation, independent of UTC midnight. Redis advances the period boundary by whole periods and resets consumed bytes atomically when a read, lease check, ticket claim, recovery, stream admission or byte reservation reaches that boundary. Country, SID, revision, connection ownership and explicit Stop are preserved. Multiple elapsed periods produce one fresh allowance, without accumulating unused traffic.
 
-The daily allowance is shared across streams and replicas. Reconnects, country changes, Stop, and resume do not reset time or byte usage. Session records remain long enough to enforce the daily allowance rather than disappearing when browsing stops.
+The daily allowance is shared across streams and replicas. Reconnects, country changes, Stop, and resume do not reset time or byte usage. Session records remain for 30 days beyond the current boundary rather than disappearing when browsing stops. Exhaustion denies traffic until the next period; stopping does not disable or advance the period clock. Both directions share the same 10,000,000,000-byte budget.
+
+Session keys use `daily:<site>:<visitor>:rolling`. On first access after upgrading, an existing record for the current UTC day migrates once into a fresh 24-hour period with the new limit, preserving already-consumed bytes and explicit Stop. Old authorization is revoked in the same transaction. Deploy all API/gateway instances together and refresh open tabs; the migration may reconnect old transports. New periods thereafter preserve healthy transports. Existing environment/Compose overrides must explicitly change to `SESSION_SECONDS=86400` and `BYTE_LIMIT=10000000000`; editing examples alone does not change an active deployment.
+
+SDK 1.0.8 uses the additive `autoRenew` session field. At a zero countdown it keeps the runtime and polls for the authoritative next boundary; it never grants traffic locally. Legacy sessions without this field retain hard expiry. The UI displays HH:MM:SS and decimal GB. Stable-loader integrations update on page reload; pinned/copied releases need updating. The upstream `ttl-1800` sticky-IP setting is independent and unchanged: continuous browsing does not promise one residential IP for 24 hours.
 
 ### Connection authorization
 
@@ -598,6 +602,7 @@ node tests/load.mjs
 node tests/failover.mjs
 node --test tests/redis-network-policy.test.mjs
 node tests/configuration.mjs
+sh tests/allowance-redis.sh  # Disposable Redis Unix socket; no published ports
 cargo test --locked
 cargo clippy --all-targets -- -D warnings
 npm audit --audit-level=high
@@ -611,7 +616,7 @@ npm audit --audit-level=high
 | `failover.mjs` | Different countries on one replica, replica failure/recovery with preserved SID/allowance, Redis outage and fail-closed behavior |
 | `configuration.mjs` | Production-mode rejection, read-only gateway secret mounts, loopback-only application listeners, private/internal Redis with no published ports, isolated bridge modes, restricted network membership, working application access, and blocked HAProxy access |
 | `redis-network-policy.test.mjs` | Rejection of published Redis ports, host networking, non-internal networks, missing isolated bridge modes, public addresses, and unauthorized network members |
-| Rust unit test | Representative allowed/blocked destination addresses |
+| Rust unit tests | Destination policy, configuration and public assets; `allowance-redis.sh` adds real-Redis renewal, concurrent charging, migration, lease/revision/Stop and 64-bit quota checks |
 
 Load tests refuse live mode. Failover tests deliberately stop/start gateways and pause/unpause Redis. Use a dedicated local test stack and do not run those tests while using the browsing UI. The scripts restore stopped services in cleanup paths, but inspect the stack after any externally interrupted test.
 

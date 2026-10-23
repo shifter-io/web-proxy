@@ -1,7 +1,7 @@
 use crate::{
     State, captcha,
     config::{COUNTRIES, Integration, random_id, valid_country},
-    store::{Session, Store},
+    store::Session,
 };
 use axum::{
     Json, Router,
@@ -113,7 +113,7 @@ async fn session(h: &HeaderMap, s: &State) -> Result<Session> {
     let site = &integration(h, s)?.site;
     let (_, id) = identity(h, s, site).await?.ok_or_else(unauthorized)?;
     s.store
-        .get(&Store::key(&format!("{}:{}", id.site, id.visitor)))
+        .current(&format!("{}:{}", id.site, id.visitor), &s.cfg)
         .await
         .map_err(storage)?
         .ok_or(Error(

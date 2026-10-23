@@ -65,7 +65,7 @@ try {
     const resumed=await v.start();assert.equal(resumed.remainingBytes,0);
   });
   await check('Hard expiry closes a running stream and rejects reconnect',async()=>{
-    const v=new Visitor();await v.start();redis('HSET',v.key,'exp',String(Date.now()+1500));
+    const v=new Visitor();await v.start();redis('HSET',v.key,'period','0','exp',String(Date.now()+1500));
     const c=await v.connect();open.push(c);await c.request('fixture.test','/slow').catch(()=>{});await sleep(600);
     assert.ok(c.closed);await v.api('session/tickets','POST',undefined,410);
     const resumed=await v.start();assert.equal(resumed.status,'expired');

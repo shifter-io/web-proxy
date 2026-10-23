@@ -45,6 +45,7 @@ fn public_path(kind: Kind, path: &str) -> Option<&str> {
                 "index.html"
                     | "minimal.html"
                     | "app.js"
+                    | "allowance.js"
                     | "base.css"
                     | "style.css"
                     | "country-order.js"

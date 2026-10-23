@@ -171,6 +171,13 @@ fn number(key: &str, default: u64) -> Result<u64> {
     }
     Ok(n)
 }
+fn allowance_duration(seconds: u64) -> Result<u64> {
+    if !(1..=86400).contains(&seconds) {
+        bail!("SESSION_SECONDS must be between 1 and 86400");
+    }
+    Ok(seconds * 1000)
+}
+
 impl Config {
     pub async fn load() -> Result<Self> {
         let environment = val("APP_ENV", "development");
@@ -295,8 +302,8 @@ impl Config {
             upstream_ips,
             account,
             password,
-            duration_ms: number("SESSION_SECONDS", 1800)? * 1000,
-            byte_limit: number("BYTE_LIMIT", 100 * 1024 * 1024)?,
+            duration_ms: allowance_duration(number("SESSION_SECONDS", 86400)?)?,
+            byte_limit: number("BYTE_LIMIT", 10_000_000_000)?,
             max_streams: number("MAX_STREAMS", 64)? as usize,
             stream_rate: number("STREAM_RATE", 32)?,
             stream_burst: number("STREAM_BURST", 64)?,
@@ -305,9 +312,6 @@ impl Config {
             test_mode,
             web_dir: val("WEB_DIR", "web"),
         };
-        if cfg.duration_ms > 1_800_000 {
-            bail!("SESSION_SECONDS must be at most 1800 for the configured sticky TTL");
-        }
         if cfg.max_streams > 128 {
             bail!("MAX_STREAMS too large");
         }
@@ -393,6 +397,16 @@ fn private_ip(ip: IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn allowance_duration_is_bounded_before_conversion() {
+        for seconds in [0, 86401, u64::MAX] {
+            assert!(allowance_duration(seconds).is_err());
+        }
+        for seconds in [1, 1800, 86400] {
+            assert_eq!(allowance_duration(seconds).unwrap(), seconds * 1000);
+        }
+    }
 
     #[test]
     fn explicit_origin_aliases_can_share_a_site() {

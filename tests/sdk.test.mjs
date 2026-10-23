@@ -551,3 +551,40 @@ test('ambiguous mutating API failure never repeats the request or exposes a raw 
   await e.proxy.changeCountry('de');await e.advance(10000);
   assert.equal(changes,1);assert.equal(e.proxy.getState().error,null);assert.equal(e.proxy.getState().status,'interrupted');
 });
+
+test('renewing allowance keeps the page at zero until the server confirms the next period',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','setInterval','Date'],now:Date.now()});
+  const e=environment(t);await e.start();
+  const frame=document.querySelector('#view iframe');
+  let session={...e.proxy.getState().session,autoRenew:true,serverTime:Date.now()+1500,expiresAt:Date.now()+2000};
+  e.setStatus(session);t.mock.timers.tick(1500);await flush();
+  assert.equal(e.proxy.getState().session.autoRenew,true);
+  t.mock.timers.tick(500);await flush();
+  assert.equal(e.proxy.getState().remainingSeconds,0);
+  assert.equal(e.proxy.getState().active,true);
+  assert.equal(document.querySelector('#view iframe'),frame);
+  session={...session,serverTime:Date.now()+1000,expiresAt:Date.now()+86401000,remainingBytes:10_000_000_000};
+  e.setStatus(session);t.mock.timers.tick(1000);await flush();
+  assert.equal(e.proxy.getState().remainingSeconds,86400);
+  assert.equal(e.proxy.getState().session.remainingBytes,10_000_000_000);
+  assert.equal(document.querySelector('#view iframe'),frame);
+  assert.equal(e.requests.filter(r=>r.url.endsWith('/sessions')).length,1);
+});
+
+test('legacy expiry still stops browsing',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','setInterval','Date'],now:Date.now()});
+  const e=environment(t);await e.start();
+  e.setStatus({...e.proxy.getState().session,serverTime:Date.now()+1500,expiresAt:Date.now()+2000});
+  t.mock.timers.tick(1500);await flush();t.mock.timers.tick(500);await flush();
+  assert.equal(e.proxy.getState().status,'expired');
+  assert.equal(e.proxy.getState().active,false);
+});
+
+test('auto-renew never bypasses server traffic exhaustion',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','setInterval','Date'],now:Date.now()});
+  const e=environment(t);await e.start();
+  e.setStatus({...e.proxy.getState().session,autoRenew:true,status:'exhausted',remainingBytes:0});
+  t.mock.timers.tick(1500);await flush();
+  assert.equal(e.proxy.getState().status,'exhausted');
+  assert.equal(e.proxy.getState().active,false);
+});
