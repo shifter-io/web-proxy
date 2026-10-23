@@ -12,7 +12,15 @@ window.createRuntimeBridge = async () => {
     if (!response.ok) throw new Error('Runtime configuration unavailable');
     config = await response.json();
   } finally { clearTimeout(timer); }
-  if (parent === window || !config.allowedOrigins.includes(parentOrigin)
+  // `https://*.example.com` allows any subdomain of example.com (not the apex).
+  const allowed = pattern => {
+    const [scheme, suffix] = pattern.split('://*.');
+    if (suffix === undefined) return pattern === parentOrigin;
+    const labels = parentOrigin?.startsWith(scheme + '://') && parentOrigin.endsWith('.' + suffix)
+      ? parentOrigin.slice(scheme.length + 3, -suffix.length - 1) : '';
+    return labels.split('.').every(label => /^[a-z0-9-]+$/.test(label));
+  };
+  if (parent === window || !config.allowedOrigins.some(allowed)
     || !config.protocolVersions.includes(protocolVersion) || !/^[a-f0-9-]{36}$/.test(channel || '')) {
     throw new Error('Invalid runtime parent');
   }

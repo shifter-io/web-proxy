@@ -19,7 +19,7 @@ async function api(path,{origin=origins[0],method='GET',body,credential,expected
   const data=await response.json().catch(()=>({}));
   assert.equal(response.status,expected,`${method} ${path}: ${data.code || response.status}`);return data;
 }
-for(const origin of origins) assert.equal((await api('config',{origin})).countries.length,54);
+for(const origin of origins) assert.equal((await api('config',{origin})).countries.length,120);
 assert.equal((await api('config',{origin:staging})).site,'shifter');
 const stagingPreflight=await fetch(base+'/api/v1/session',{method:'OPTIONS',headers:{Origin:staging,'Access-Control-Request-Method':'GET','Access-Control-Request-Headers':'authorization'}});
 assert.equal(stagingPreflight.headers.get('access-control-allow-origin'),staging);

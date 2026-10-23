@@ -43,13 +43,16 @@ async function main() {
   for (const {code} of countries) await access(path.join(shifterDirectory, `public/images/flags/${code}.svg`));
   const configFile = path.join(root, 'src/config.rs');
   const config = await readFile(configFile, 'utf8');
-  const block = /pub const COUNTRIES: &\[\(&str, &str\)\] = &\[[\s\S]*?\n\];/;
+  const block = /pub const SHIFTER_POOL_COUNTRIES: &\[\(&str, &str\)\] = &\[[\s\S]*?\n\];/;
   if (!block.test(config)) throw new Error('Country allowlist not found');
-  const rust = 'pub const COUNTRIES: &[(&str, &str)] = &[\n' + countries.map(({code,name}) => `    (${JSON.stringify(code)}, ${JSON.stringify(name)}),`).join('\n') + '\n];';
+  const global = config.match(/pub const GLOBAL_POOL_COUNTRIES: &\[\(&str, &str\)\] = &\[[\s\S]*?\n\];/)?.[0] ?? '';
+  const overlap = countries.filter(({code}) => global.includes(`("${code}",`));
+  if (overlap.length) throw new Error(`Remove from GLOBAL_POOL_COUNTRIES first: ${overlap.map(c => c.code).join(', ')}`);
+  const rust = 'pub const SHIFTER_POOL_COUNTRIES: &[(&str, &str)] = &[\n' + countries.map(({code,name}) => `    (${JSON.stringify(code)}, ${JSON.stringify(name)}),`).join('\n') + '\n];';
   await mkdir(path.join(root, 'web/control/assets/flags'), {recursive:true});
   for (const {code} of countries) await copyFile(path.join(shifterDirectory, `public/images/flags/${code}.svg`), path.join(root, `web/control/assets/flags/${code}.svg`));
   await writeFile(configFile, config.replace(block, rust));
-  console.log(`Updated ${countries.length} countries (Shifter weight > 250) and copied matching flag assets.`);
+  console.log(`Updated ${countries.length} Shifter-pool countries (Shifter weight > 250) and copied matching flag assets.`);
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   main().catch(error => { console.error(error.message); process.exitCode = 1; });
