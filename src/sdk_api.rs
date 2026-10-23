@@ -1,7 +1,7 @@
 use crate::{
     State, captcha,
     config::{COUNTRIES, Integration, random_id, valid_country},
-    store::{Session, Store},
+    store::Session,
 };
 use axum::{
     Json, Router,
@@ -111,16 +111,26 @@ async fn identity(h: &HeaderMap, s: &State, site: &str) -> Result<Option<(String
 }
 async fn session(h: &HeaderMap, s: &State) -> Result<Session> {
     let site = &integration(h, s)?.site;
-    let (_, id) = identity(h, s, site).await?.ok_or_else(unauthorized)?;
-    s.store
-        .get(&Store::key(&format!("{}:{}", id.site, id.visitor)))
+    let (key, id) = identity(h, s, site).await?.ok_or_else(unauthorized)?;
+    let current = s
+        .store
+        .current(&format!("{}:{}", id.site, id.visitor), &s.cfg)
         .await
         .map_err(storage)?
         .ok_or(Error(
             StatusCode::NOT_FOUND,
             "NO_SESSION",
             "No browsing session",
-        ))
+        ))?;
+    if !s
+        .store
+        .bind_identity(&current, &key)
+        .await
+        .map_err(storage)?
+    {
+        return Err(unauthorized());
+    }
+    Ok(current)
 }
 fn active(s: &Session) -> Result<()> {
     if !s.active() {
@@ -285,18 +295,26 @@ async fn start(
         )
         .await
         .map_err(storage)?;
-    // Refresh only after successful verification; keep the visitor ID and its existing budget.
+    // Fresh verification may establish identity; subsequent authorized activity extends it.
     let _: () = s
         .store
         .db
         .clone()
         .set_ex(
-            key,
+            &key,
             serde_json::to_string(&id).map_err(storage)?,
             IDENTITY_TTL,
         )
         .await
         .map_err(storage)?;
+    if !s
+        .store
+        .bind_identity(&current, &key)
+        .await
+        .map_err(storage)?
+    {
+        return Err(unauthorized());
+    }
     Ok(Json(
         json!({"session":public(&current),"credential":credential}),
     ))

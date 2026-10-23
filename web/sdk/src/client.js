@@ -38,6 +38,7 @@ export function create({container, apiOrigin, nonce} = {}) {
   async function api(path, method = 'GET', body, attempt = 0) {
     ensure();
     let response, data;
+    const requestCredential = credential, requestGeneration = generation;
     try {
       // AbortSignal.any is absent in Chromium 107 (Brave 1.45). Use the older
       // AbortController API, retaining cancellation and the response deadline.
@@ -70,7 +71,11 @@ export function create({container, apiOrigin, nonce} = {}) {
     }
     ensure();
     if (!response.ok) {
-      if (response.status === 401) { credential = undefined; try { localStorage.removeItem(storageKey); } catch {} }
+      if (response.status === 401) {
+        if (requestCredential !== credential || requestGeneration !== generation) throw failure('CANCELLED','This request belongs to a previous browsing session.');
+        credential = undefined; try { localStorage.removeItem(storageKey); } catch {}
+        if (state.active) expire('stopped');
+      }
       const transient = [502,503,504].includes(response.status) && !data.code;
       if (transient && (method === 'GET' || path === 'session/tickets') && attempt < 2) {
         await delay(500 * 2 ** attempt, controller.signal);
@@ -289,7 +294,8 @@ export function create({container, apiOrigin, nonce} = {}) {
     if (!state.active || !state.session) return;
     const seconds = Math.max(0, Math.ceil((state.session.expiresAt-Date.now()-(state.clockOffset || 0))/1000));
     if (state.remainingSeconds !== seconds) emit({remainingSeconds:seconds});
-    if (!seconds) expire('expired');
+    // Renewal is authoritative on the server; keep the page while status refreshes.
+    if (!seconds && !state.session.autoRenew) expire('expired');
   }, 250);
   async function operation(fn) {
     ensure();

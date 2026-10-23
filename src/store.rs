@@ -20,13 +20,15 @@ pub struct Session {
     pub limit: u64,
     pub stopped: bool,
     pub connected: bool,
+    #[serde(default)]
+    pub auto_renew: bool,
 }
 impl Session {
     pub fn active(&self) -> bool {
-        !self.stopped && self.expires_at > now_ms() && self.used < self.limit
+        !self.stopped && (self.auto_renew || self.expires_at > now_ms()) && self.used < self.limit
     }
     pub fn public(&self) -> serde_json::Value {
-        let status = if self.expires_at <= now_ms() {
+        let status = if !self.auto_renew && self.expires_at <= now_ms() {
             "expired"
         } else if self.used >= self.limit {
             "exhausted"
@@ -37,7 +39,7 @@ impl Session {
         };
         serde_json::json!({"country":self.country,"status":status,"serverTime":now_ms(),
             "expiresAt":self.expires_at,"remainingBytes":self.limit.saturating_sub(self.used),
-            "byteLimit":self.limit,"connected":self.connected,"developmentIdentity":true})
+            "byteLimit":self.limit,"autoRenew":self.auto_renew,"connected":self.connected,"developmentIdentity":true})
     }
 }
 impl Store {
@@ -66,10 +68,16 @@ impl Store {
         })
     }
     pub fn key(visitor: &str) -> String {
-        format!("daily:{visitor}:{}", now_ms() / 86_400_000)
+        format!("daily:{visitor}:rolling")
     }
     pub async fn get(&self, key: &str) -> Result<Option<Session>> {
-        let h: HashMap<String, String> = self.db.clone().hgetall(key).await?;
+        let h: HashMap<String, String> = allowance_script(
+            "if identity_alive(KEYS[1], tonumber(ARGV[1]), true) then renew(KEYS[1], tonumber(ARGV[1])) end; return redis.call('HGETALL',KEYS[1])",
+        )
+        .key(key)
+        .arg(now_ms())
+        .invoke_async(&mut self.db.clone())
+        .await?;
         if h.is_empty() {
             return Ok(None);
         }
@@ -83,6 +91,7 @@ impl Store {
             used: h["used"].parse()?,
             limit: h["limit"].parse()?,
             stopped: h["stopped"] == "1",
+            auto_renew: h.get("period").is_some_and(|p| p != "0"),
             connected: h
                 .get("lease_until")
                 .and_then(|v| v.parse::<u64>().ok())
@@ -91,16 +100,51 @@ impl Store {
         };
         Ok(Some(s))
     }
+    /// Upgrade today's legacy allowance once, preserving usage and explicit Stop.
+    /// Retire its old authorization before making the replacement available.
+    pub async fn current(&self, visitor: &str, cfg: &Config) -> Result<Option<Session>> {
+        let key = Self::key(visitor);
+        let now = now_ms();
+        let _: i64 = Script::new(include_str!("store_migrate.lua"))
+            .key(&key)
+            .key(format!("daily:{visitor}:{}", now / 86_400_000))
+            .arg(now)
+            .arg(cfg.duration_ms)
+            .arg(cfg.byte_limit)
+            .invoke_async(&mut self.db.clone())
+            .await?;
+        self.get(&key).await
+    }
+    /// Bind verified SDK identity to forwarding; never recreate an expired identity.
+    pub async fn bind_identity(&self, session: &Session, identity: &str) -> Result<bool> {
+        let ok: i64 = Script::new(
+            r#"
+            if redis.call('EXISTS',KEYS[1])==0 or redis.call('EXISTS',KEYS[2])==0 then return 0 end
+            local bound=redis.call('HGET',KEYS[1],'identity')
+            if bound and bound~=KEYS[2] then return 0 end
+            redis.call('HSET',KEYS[1],'identity',KEYS[2])
+            redis.call('PEXPIREAT',KEYS[2],ARGV[1])
+            return 1
+        "#,
+        )
+        .key(&session.key)
+        .key(identity)
+        .arg(now_ms() + 30 * 86_400_000)
+        .invoke_async(&mut self.db.clone())
+        .await?;
+        Ok(ok == 1)
+    }
     pub async fn start(&self, visitor: &str, country: &str, cfg: &Config) -> Result<Session> {
         let key = Self::key(visitor);
         let now = now_ms();
-        let exp = (now + cfg.duration_ms).min((now / 86_400_000 + 1) * 86_400_000);
+        self.current(visitor, cfg).await?;
+        let exp = now + cfg.duration_ms;
         let sid = random_id();
         let _: i64 = Script::new(
             r#"
             if redis.call('EXISTS',KEYS[1])==0 then
               redis.call('HSET',KEYS[1],'country',ARGV[1],'sid',ARGV[2],'region',ARGV[3],
-                'exp',ARGV[4],'rev',1,'used',0,'limit',ARGV[5],'stopped',0)
+                'exp',ARGV[4],'rev',1,'used',0,'limit',ARGV[5],'stopped',0,'period',ARGV[7])
               redis.call('PEXPIREAT',KEYS[1],ARGV[6])
             elseif redis.call('HGET',KEYS[1],'stopped')=='1' then
               redis.call('HSET',KEYS[1],'stopped',0,'sid',ARGV[2],'country',ARGV[1])
@@ -115,7 +159,8 @@ impl Store {
         .arg(&cfg.region)
         .arg(exp)
         .arg(cfg.byte_limit)
-        .arg((now / 86_400_000 + 2) * 86_400_000)
+        .arg(exp + 30 * 86_400_000)
+        .arg(cfg.duration_ms)
         .invoke_async(&mut self.db.clone())
         .await?;
         self.get(&key)
@@ -190,9 +235,11 @@ impl Store {
         host: &str,
         upstream: bool,
     ) -> Result<bool> {
-        let ok: i64 = Script::new(r#"
+        let ok: i64 = allowance_script(r#"
             if redis.call('HGET',KEYS[1],'rev')~=ARGV[1]
               or redis.call('HGET',KEYS[1],'stopped')~='0' then return 0 end
+            if not identity_alive(KEYS[1], tonumber(ARGV[2]), false) then return 0 end
+            renew(KEYS[1], tonumber(ARGV[2]))
             if tonumber(redis.call('HGET',KEYS[1],'exp'))<=tonumber(ARGV[2])
               or tonumber(redis.call('HGET',KEYS[1],'used'))>=tonumber(redis.call('HGET',KEYS[1],'limit')) then return 0 end
             if ARGV[3]=='1' and redis.call('GET',KEYS[2])~=ARGV[1] then return 0 end
@@ -217,8 +264,10 @@ impl Store {
             .await?;
         let session: Session =
             serde_json::from_str(&raw.ok_or_else(|| anyhow::anyhow!("invalid ticket"))?)?;
-        let ok:i64=Script::new(r#"
+        let ok:i64=allowance_script(r#"
             if redis.call('HGET',KEYS[1],'rev')~=ARGV[1] or redis.call('HGET',KEYS[1],'stopped')~='0' then return 0 end
+            if not identity_alive(KEYS[1], tonumber(ARGV[2]), true) then return 0 end
+            renew(KEYS[1], tonumber(ARGV[2]))
             if tonumber(redis.call('HGET',KEYS[1],'exp'))<=tonumber(ARGV[2]) then return 0 end
             if tonumber(redis.call('HGET',KEYS[1],'used'))>=tonumber(redis.call('HGET',KEYS[1],'limit')) then return 0 end
             local until_ms=tonumber(redis.call('HGET',KEYS[1],'lease_until') or '0')
@@ -233,9 +282,11 @@ impl Store {
         Ok(session)
     }
     pub async fn heartbeat(&self, s: &Session, owner: &str) -> Result<bool> {
-        let ok:i64=Script::new(r#"
+        let ok:i64=allowance_script(r#"
             if redis.call('HGET',KEYS[1],'rev')~=ARGV[1] or redis.call('HGET',KEYS[1],'owner')~=ARGV[2]
               or redis.call('HGET',KEYS[1],'stopped')~='0' then return 0 end
+            if not identity_alive(KEYS[1], tonumber(ARGV[3]), true) then return 0 end
+            renew(KEYS[1], tonumber(ARGV[3]))
             if tonumber(redis.call('HGET',KEYS[1],'exp'))<=tonumber(ARGV[3])
               or tonumber(redis.call('HGET',KEYS[1],'lease_until') or '0')<=tonumber(ARGV[3]) then return 0 end
             if tonumber(redis.call('HGET',KEYS[1],'used'))>=tonumber(redis.call('HGET',KEYS[1],'limit')) then return 0 end
@@ -260,9 +311,11 @@ impl Store {
     /// Charge before forwarding, using a single atomic operation for all streams/replicas.
     /// A failed write may conservatively consume its reserved bytes; no overrun is possible.
     pub async fn charge(&self, s: &Session, owner: &str, n: usize) -> Result<usize> {
-        let allowed:i64=Script::new(r#"
+        let allowed:i64=allowance_script(r#"
             if redis.call('HGET',KEYS[1],'rev')~=ARGV[1] or redis.call('HGET',KEYS[1],'owner')~=ARGV[2]
               or redis.call('HGET',KEYS[1],'stopped')~='0' then return 0 end
+            if not identity_alive(KEYS[1], tonumber(ARGV[3]), false) then return 0 end
+            renew(KEYS[1], tonumber(ARGV[3]))
             if tonumber(redis.call('HGET',KEYS[1],'exp'))<=tonumber(ARGV[3])
               or tonumber(redis.call('HGET',KEYS[1],'lease_until') or '0')<=tonumber(ARGV[3]) then return 0 end
             local left=tonumber(redis.call('HGET',KEYS[1],'limit'))-tonumber(redis.call('HGET',KEYS[1],'used'))
@@ -280,10 +333,12 @@ impl Store {
         rate: u64,
         burst: u64,
     ) -> Result<bool> {
-        let ok:i64=Script::new(r#"
+        let ok:i64=allowance_script(r#"
             if redis.call('HGET',KEYS[1],'owner')~=ARGV[1]
               or redis.call('HGET',KEYS[1],'rev')~=ARGV[5]
               or redis.call('HGET',KEYS[1],'stopped')~='0' then return 0 end
+            if not identity_alive(KEYS[1], tonumber(ARGV[2]), false) then return 0 end
+            renew(KEYS[1], tonumber(ARGV[2]))
             local now=tonumber(ARGV[2])
             if tonumber(redis.call('HGET',KEYS[1],'exp') or '0')<=now
               or tonumber(redis.call('HGET',KEYS[1],'lease_until') or '0')<=now
@@ -297,3 +352,13 @@ impl Store {
         Ok(ok == 1)
     }
 }
+
+// The same renewal runs inside reads, lease checks and byte reservations: a period
+// boundary cannot disconnect a healthy transport or reset concurrent charges twice.
+fn allowance_script(body: &str) -> Script {
+    Script::new(&format!("{}\n{body}", include_str!("store_allowance.lua")))
+}
+
+#[cfg(test)]
+#[path = "store_tests.rs"]
+mod tests;

@@ -551,3 +551,85 @@ test('ambiguous mutating API failure never repeats the request or exposes a raw 
   await e.proxy.changeCountry('de');await e.advance(10000);
   assert.equal(changes,1);assert.equal(e.proxy.getState().error,null);assert.equal(e.proxy.getState().status,'interrupted');
 });
+
+test('renewing allowance keeps the page at zero until the server confirms the next period',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','setInterval','Date'],now:Date.now()});
+  const e=environment(t);await e.start();
+  const frame=document.querySelector('#view iframe');
+  let session={...e.proxy.getState().session,autoRenew:true,serverTime:Date.now()+1500,expiresAt:Date.now()+2000};
+  e.setStatus(session);t.mock.timers.tick(1500);await flush();
+  assert.equal(e.proxy.getState().session.autoRenew,true);
+  t.mock.timers.tick(500);await flush();
+  assert.equal(e.proxy.getState().remainingSeconds,0);
+  assert.equal(e.proxy.getState().active,true);
+  assert.equal(document.querySelector('#view iframe'),frame);
+  session={...session,serverTime:Date.now()+1000,expiresAt:Date.now()+86401000,remainingBytes:10_000_000_000};
+  e.setStatus(session);t.mock.timers.tick(1000);await flush();
+  assert.equal(e.proxy.getState().remainingSeconds,86400);
+  assert.equal(e.proxy.getState().session.remainingBytes,10_000_000_000);
+  assert.equal(document.querySelector('#view iframe'),frame);
+  assert.equal(e.requests.filter(r=>r.url.endsWith('/sessions')).length,1);
+});
+
+test('legacy expiry still stops browsing',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','setInterval','Date'],now:Date.now()});
+  const e=environment(t);await e.start();
+  e.setStatus({...e.proxy.getState().session,serverTime:Date.now()+1500,expiresAt:Date.now()+2000});
+  t.mock.timers.tick(1500);await flush();t.mock.timers.tick(500);await flush();
+  assert.equal(e.proxy.getState().status,'expired');
+  assert.equal(e.proxy.getState().active,false);
+});
+
+test('auto-renew never bypasses server traffic exhaustion',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','setInterval','Date'],now:Date.now()});
+  const e=environment(t);await e.start();
+  e.setStatus({...e.proxy.getState().session,autoRenew:true,status:'exhausted',remainingBytes:0});
+  t.mock.timers.tick(1500);await flush();
+  assert.equal(e.proxy.getState().status,'exhausted');
+  assert.equal(e.proxy.getState().active,false);
+});
+
+for (const action of ['status', 'stop']) test(`identity loss during ${action} tears down forwarding locally`,async t=>{
+  t.mock.timers.enable({apis:['setTimeout','setInterval','Date'],now:Date.now()});
+  const e=environment(t);await e.start();
+  const original=document.querySelector('#view iframe');
+  t.mock.method(globalThis,'fetch',async()=>({ok:false,status:401,json:async()=>({code:'AUTH_REQUIRED',error:'Start a browsing session'})}));
+  if (action === 'stop') await assert.rejects(e.proxy.stop(),{code:'AUTH_REQUIRED'});
+  else { t.mock.timers.tick(1500);await flush(); }
+  assert.equal(e.proxy.getState().active,false);
+  assert.equal(original.isConnected,false);
+  assert.equal(localStorage.length,0);
+  e.runtimeMessage('cleared');await flush();
+  assert.equal(document.querySelector('iframe'),null);
+});
+
+test('a delayed old-identity 401 cannot stop a freshly verified session',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','setInterval','Date'],now:Date.now()});
+  const e=environment(t);await e.start();
+  const originalFetch=globalThis.fetch;
+  let release, hold=true;
+  t.mock.method(globalThis,'fetch',async(url,options)=>{
+    if(url.endsWith('/tickets') && hold) {
+      hold=false;return new Promise(resolve=>{release=resolve;});
+    }
+    if(url.endsWith('/session')) return {ok:false,status:401,json:async()=>({code:'AUTH_REQUIRED'})};
+    const response=await originalFetch(url,options);
+    if(url.endsWith('/sessions')) {
+      const data=await response.json();data.credential='b'.repeat(64);
+      return {ok:true,status:200,json:async()=>data};
+    }
+    return response;
+  });
+  e.runtimeMessage('ready');await flush();assert.equal(typeof release,'function');
+  t.mock.timers.tick(1500);await flush();
+  assert.equal(e.proxy.getState().active,false);
+  e.runtimeMessage('cleared');await flush();
+  await e.start();
+  const replacement=document.querySelector('#view iframe');
+  const storageKey=localStorage.key(0);
+  assert.equal(localStorage.getItem(storageKey),'b'.repeat(64));
+  release({ok:false,status:401,json:async()=>({code:'AUTH_REQUIRED'})});await flush();
+  assert.equal(e.proxy.getState().active,true);
+  assert.equal(document.querySelector('#view iframe'),replacement);
+  assert.equal(localStorage.getItem(storageKey),'b'.repeat(64));
+});
