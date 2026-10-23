@@ -111,7 +111,7 @@ async fn identity(h: &HeaderMap, s: &State, site: &str) -> Result<Option<(String
 }
 async fn session(h: &HeaderMap, s: &State) -> Result<Session> {
     let site = &integration(h, s)?.site;
-    let (_, id) = identity(h, s, site).await?.ok_or_else(unauthorized)?;
+    let (key, id) = identity(h, s, site).await?.ok_or_else(unauthorized)?;
     let current = s
         .store
         .current(&format!("{}:{}", id.site, id.visitor), &s.cfg)

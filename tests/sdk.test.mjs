@@ -602,3 +602,34 @@ for (const action of ['status', 'stop']) test(`identity loss during ${action} te
   e.runtimeMessage('cleared');await flush();
   assert.equal(document.querySelector('iframe'),null);
 });
+
+test('a delayed old-identity 401 cannot stop a freshly verified session',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','setInterval','Date'],now:Date.now()});
+  const e=environment(t);await e.start();
+  const originalFetch=globalThis.fetch;
+  let release, hold=true;
+  t.mock.method(globalThis,'fetch',async(url,options)=>{
+    if(url.endsWith('/tickets') && hold) {
+      hold=false;return new Promise(resolve=>{release=resolve;});
+    }
+    if(url.endsWith('/session')) return {ok:false,status:401,json:async()=>({code:'AUTH_REQUIRED'})};
+    const response=await originalFetch(url,options);
+    if(url.endsWith('/sessions')) {
+      const data=await response.json();data.credential='b'.repeat(64);
+      return {ok:true,status:200,json:async()=>data};
+    }
+    return response;
+  });
+  e.runtimeMessage('ready');await flush();assert.equal(typeof release,'function');
+  t.mock.timers.tick(1500);await flush();
+  assert.equal(e.proxy.getState().active,false);
+  e.runtimeMessage('cleared');await flush();
+  await e.start();
+  const replacement=document.querySelector('#view iframe');
+  const storageKey=localStorage.key(0);
+  assert.equal(localStorage.getItem(storageKey),'b'.repeat(64));
+  release({ok:false,status:401,json:async()=>({code:'AUTH_REQUIRED'})});await flush();
+  assert.equal(e.proxy.getState().active,true);
+  assert.equal(document.querySelector('#view iframe'),replacement);
+  assert.equal(localStorage.getItem(storageKey),'b'.repeat(64));
+});

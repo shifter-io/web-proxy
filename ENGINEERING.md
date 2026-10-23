@@ -473,7 +473,7 @@ The daily allowance is shared across streams and replicas. Reconnects, country c
 
 Session keys use `daily:<site>:<visitor>:rolling`. On first access after upgrading, an existing record for the current UTC day migrates once into a fresh 24-hour period with the new limit, preserving already-consumed bytes and explicit Stop. Old authorization is revoked in the same transaction. Deploy all API/gateway instances together and refresh open tabs; the migration may reconnect old transports. New periods thereafter preserve healthy transports. Existing environment/Compose overrides must explicitly change to `SESSION_SECONDS=86400` and `BYTE_LIMIT=10000000000`; editing examples alone does not change an active deployment.
 
-SDK 1.0.9 uses the additive `autoRenew` session field. At a zero countdown it keeps the runtime and polls for the authoritative next boundary; it never grants traffic locally. Legacy sessions without this field retain hard expiry. The UI displays HH:MM:SS and decimal GB. Stable-loader integrations update on page reload; pinned/copied releases need updating. The upstream `ttl-1800` sticky-IP setting is independent and unchanged: continuous browsing does not promise one residential IP for 24 hours.
+SDK 1.0.10 uses the additive `autoRenew` session field. At a zero countdown it keeps the runtime and polls for the authoritative next boundary; it never grants traffic locally. Legacy sessions without this field retain hard expiry. The UI displays HH:MM:SS and decimal GB. Stable-loader integrations update on page reload; pinned/copied releases need updating. The upstream `ttl-1800` sticky-IP setting is independent and unchanged: continuous browsing does not promise one residential IP for 24 hours.
 
 ### Connection authorization
 

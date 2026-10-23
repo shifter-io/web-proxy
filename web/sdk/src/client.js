@@ -38,6 +38,7 @@ export function create({container, apiOrigin, nonce} = {}) {
   async function api(path, method = 'GET', body, attempt = 0) {
     ensure();
     let response, data;
+    const requestCredential = credential, requestGeneration = generation;
     try {
       // AbortSignal.any is absent in Chromium 107 (Brave 1.45). Use the older
       // AbortController API, retaining cancellation and the response deadline.
@@ -71,6 +72,7 @@ export function create({container, apiOrigin, nonce} = {}) {
     ensure();
     if (!response.ok) {
       if (response.status === 401) {
+        if (requestCredential !== credential || requestGeneration !== generation) throw failure('CANCELLED','This request belongs to a previous browsing session.');
         credential = undefined; try { localStorage.removeItem(storageKey); } catch {}
         if (state.active) expire('stopped');
       }
