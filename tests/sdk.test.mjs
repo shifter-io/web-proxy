@@ -216,6 +216,18 @@ test('runtime bridge binds origin, source, protocol and channel',async()=>{
   assert.match(bridge.query,/parentOrigin=/);
 });
 
+test('runtime bridge accepts wildcard subdomains but not the apex or lookalikes',async()=>{
+  const source=await readFile(new URL('../web/runtime/bridge.js',import.meta.url),'utf8');
+  const channel='12345678-1234-1234-1234-123456789abc';
+  const attempt=async parentOrigin=>{
+    const window={};
+    runInNewContext(source,{window,parent:{postMessage(){}},URLSearchParams,AbortController,setTimeout,clearTimeout,location:{search:`?parentOrigin=${encodeURIComponent(parentOrigin)}&channel=${channel}&protocolVersion=1`},fetch:async()=>({ok:true,json:async()=>({allowedOrigins:['https://*.example.com'],protocolVersions:[1]})})});
+    return window.createRuntimeBridge().then(()=>true,()=>false);
+  };
+  for(const origin of ['https://abc.example.com','https://a.b.example.com']) assert.ok(await attempt(origin),origin);
+  for(const origin of ['https://example.com','http://abc.example.com','https://abcexample.com','https://abc.example.com.evil.test','https://.example.com']) assert.ok(!await attempt(origin),origin);
+});
+
 test('first-party storage denial preserves the current in-memory session',async t=>{
   const e=environment(t);
   Object.defineProperty(globalThis,'localStorage',{configurable:true,value:{getItem(){throw new Error('disabled');},setItem(){throw new Error('disabled');},removeItem(){}}});

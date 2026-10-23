@@ -20,8 +20,10 @@ test('disabled, empty and malformed inputs cannot silently replace the allowlist
 });
 test('every backend country has a local flag and the default US remains available', async () => {
   const config = await readFile(new URL('../src/config.rs', import.meta.url),'utf8');
-  const block = config.match(/pub const COUNTRIES:[\s\S]*?\n\];/)[0];
-  const codes = [...block.matchAll(/\("([a-z]{2})",/g)].map(m=>m[1]);
+  const codes = ['SHIFTER_POOL_COUNTRIES','GLOBAL_POOL_COUNTRIES'].flatMap(name => {
+    const block = config.match(new RegExp(`pub const ${name}:[\\s\\S]*?\\n\\];`))[0];
+    return [...block.matchAll(/\("([a-z]{2})",/g)].map(m=>m[1]);
+  });
   assert.equal(codes.length,new Set(codes).size);
   assert.ok(codes.includes('us'));
   for(const code of codes) await access(new URL(`../web/control/assets/flags/${code}.svg`,import.meta.url));

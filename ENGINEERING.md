@@ -55,7 +55,7 @@ The browser retains Back, Forward, Reload, country selection, the URL field, tim
 
 ## Shared SDK integration
 
-The examples use reserved origins `https://example.com`, `https://second.example.com`, and `https://staging.example.com`. Set your actual origins only in the ignored production environment file; production startup requires an explicit `INTEGRATIONS` value. No `www`, HTTP, wildcard, or other subdomain is implicitly included. Loading the public JavaScript does not grant authorization; API and runtime origins are checked separately.
+The examples use reserved origins `https://example.com`, `https://second.example.com`, and `https://staging.example.com`. Set your actual origins only in the ignored production environment file; production startup requires an explicit `INTEGRATIONS` value. No `www`, HTTP, wildcard, or other subdomain is implicitly included; add an explicit `https://*.example.com` entry to allow its subdomains. Loading the public JavaScript does not grant authorization; API and runtime origins are checked separately.
 
 ```html
 <div id="proxy-view" style="height:70vh"></div>
@@ -331,7 +331,7 @@ mkdir -p .secrets/https .secrets/redis-tls
 Edit the ignored `.env.production` generated from `deploy/production.example.env`:
 
 - `RUNTIME_HOST=proxy.example.net` is the public gateway hostname. Point its DNS record at the ingress host. Only HAProxy publishes ports 80 and 443. The API and gateway listeners stay on the internal ingress network; gateways have a separate outbound network for Shifter.
-- `INTEGRATIONS` maps exact HTTPS origins to stable website IDs. The production environment example keeps `https://example.com` (`shifter`) and `https://second.example.com` (`ip-info`) and adds `https://staging.example.com` (`shifter`) for staging. Origins must be unique; explicitly configured aliases may share a site ID and its bearer-identity/quota namespace. Browser storage remains separate per origin, and CAPTCHA verification still checks the exact requesting hostname. Set the same mapping in API and gateways. Website IDs namespace quotas; do not rename them during an ordinary release. There is no built-in production allowlist; production startup requires this explicit setting. No implicit `www`, other subdomains, or localhost are added.
+- `INTEGRATIONS` maps exact HTTPS origins to stable website IDs. The production environment example keeps `https://example.com` (`shifter`) and `https://second.example.com` (`ip-info`) and adds `https://staging.example.com` (`shifter`) for staging. Origins must be unique; explicitly configured aliases may share a site ID and its bearer-identity/quota namespace. Browser storage remains separate per origin, and CAPTCHA verification still checks the exact requesting hostname. Set the same mapping in API and gateways. Website IDs namespace quotas; do not rename them during an ordinary release. There is no built-in production allowlist; production startup requires this explicit setting. No implicit `www`, other subdomains, or localhost are added. An origin of the form `https://*.example.com` explicitly allows every subdomain at any depth (`https://abc.example.com`, `https://a.b.example.com`) but not the apex, so list `https://example.com` separately when it is needed. Wildcards must be the whole leftmost label and cover a domain, not a bare top-level domain. An exact origin always wins over a wildcard, and CAPTCHA verification checks the concrete requesting hostname. CORS, `frame-ancestors`, and the runtime parent check apply the same rule.
 - Set `TLS_CERT_DIR` to a directory containing one or more `.pem` files, each with the full certificate chain followed by its private key. The certificate must cover `proxy.example.net` (or the configured `RUNTIME_HOST`). Provision certificates through your existing certificate manager or ACME DNS challenge workflow. The example does not issue or renew certificates automatically. Mount only the needed server PEM files, not an entire CA/ACME account directory.
 - Set `REDIS_NETWORK` to the existing Redis Docker network. It must be an internal bridge with IPv4/IPv6 gateway mode `isolated`, no Redis published ports, and only Redis/API/gateways as members. HAProxy never joins it. For Redis on separate private infrastructure, adapt the application state-network attachment and firewall policy to that deployment; the supplied Compose topology assumes a shared Docker network.
 - Set `REDIS_URL_SECRET_FILE` to an ignored file containing `rediss://USER:URL_ENCODED_PASSWORD@PRIVATE_REDIS_HOST:6379/0` for production Redis with verified TLS. The hostname must resolve only to private addresses. Use a dedicated named ACL user, with unauthenticated default access disabled. Production requires TLS with certificate and hostname verification for client and replication traffic, as specified by the Redis security rule.
@@ -402,7 +402,7 @@ These advanced settings are set in the local Compose environment or supplied whe
 | `REDIS_URL` | `redis://redis:6379/` | Local shared session store; production policy requires private `rediss://` with named ACL credentials and verified TLS |
 | `REDIS_URL_FILE` | `/run/secrets/redis_url` in production | Read the connection URL from a secret file; takes precedence over `REDIS_URL` |
 | `REDIS_CA_FILE` | Empty (system trust) | Optional PEM CA bundle for private Redis TLS; hostname verification always remains enabled |
-| `INTEGRATIONS` | Two production websites; localhost in development | JSON array of exact `{origin, site}` mappings |
+| `INTEGRATIONS` | Two production websites; localhost in development | JSON array of `{origin, site}` mappings (exact origins or `https://*.domain` wildcards) |
 | `CONTROL_ORIGIN` | `http://localhost:8080` | Legacy synthetic-test origin and local default only |
 | `RECAPTCHA_SITE_KEY` | Empty outside tests | Public standard v2 checkbox key; required in production |
 | `RECAPTCHA_SECRET_FILE` | None | API-only mounted secret file; required in production |
@@ -410,7 +410,7 @@ These advanced settings are set in the local Compose environment or supplied whe
 | `CREDENTIALS_FILE` | `/run/secrets/shifter_credentials` | In-container credential path |
 | `WEB_DIR` | `/app/web` in Docker | Static asset root |
 
-Country availability is generated from the [Shifter session-manager weights](https://github.com/leftclick-io/session-manager/blob/master/config/weights.json). Sum only `shifter` leaf counts within each country in `locations`; include countries with a total **strictly greater than 250**. The current snapshot yields **54 countries**. This is a weights-based snapshot, not a live availability check. Both the country API and gateway validation use the same generated allowlist. Missing or unlisted countries are rejected; country targeting is never silently omitted.
+Country availability is generated from the [Shifter session-manager weights](https://github.com/leftclick-io/session-manager/blob/master/config/weights.json). Sum only `shifter` leaf counts within each country in `locations`; include countries with a total **strictly greater than 250**. The current snapshot yields **54 countries**, which form `SHIFTER_POOL_COUNTRIES`. This is a weights-based snapshot, not a live availability check. A separate, hand-maintained `GLOBAL_POOL_COUNTRIES` list in `src/config.rs` adds 66 countries routed through the global pool, so 120 countries are selectable. The two lists must not overlap; the importer refuses to run when a newly eligible country is still listed in the global pool. Both the country API and gateway validation use the combined allowlist. Missing or unlisted countries are rejected; country targeting is never silently omitted.
 
 The searchable country picker groups eligible locations into Tier 1, Tier 2, and Tier 3, with the US, UK, Canada, Germany, Italy, and France first. These are configurable product display priorities in `web/control/country-order.js`, independent of the IP-count eligibility filter. Filtering search results preserves that order, and future weights refreshes cannot replace it with alphabetical order. Countries not explicitly prioritized fall into Tier 3 alphabetically. The picker defaults to the United States and uses the Astro site’s existing circular SVG flags and country names. Flags appear in the selected value and every menu option, in both the landing page and browser toolbar. Keyboard users can search, move with arrow keys, select with Enter, and dismiss with Escape.
 
@@ -421,7 +421,7 @@ node scripts/sync-countries.mjs /path/to/weights.json /path/to/Shifter-Astro
 node --test tests/countries.test.mjs
 ```
 
-The importer updates `src/config.rs` and copies eligible flags from the Astro checkout. It does not copy provider weights, counts, or operational metadata into this repository. Rebuild the API and gateways together after refreshing the list. The boundary test excludes a country at exactly 250 and ensures other providers cannot make a country eligible.
+The importer updates `SHIFTER_POOL_COUNTRIES` in `src/config.rs` and copies eligible flags from the Astro checkout. It does not copy provider weights, counts, or operational metadata into this repository. Rebuild the API and gateways together after refreshing the list. The boundary test excludes a country at exactly 250 and ensures other providers cannot make a country eligible.
 
 The regional allowlist is `fra`, `ams`, `lon`, `nyc`, `tor`, `sgp`, `blr`, and `syd`. Only the BLR upstream was exercised in the initial live validation.
 
@@ -547,10 +547,10 @@ For each destination stream, the gateway:
 The username format is:
 
 ```text
-customer-<account>-country-<country>-strict-true-sid-<128-bit-random-hex>-ttl-1800-pool-shifter
+customer-<account>-country-<country>-strict-true-sid-<128-bit-random-hex>-ttl-1800[-pool-shifter]
 ```
 
-The final `pool-shifter` flag restricts upstream assignments to the Shifter pool. The gateway always adds it server-side; visitors cannot choose or override the pool.
+The final `pool-shifter` flag restricts upstream assignments to the Shifter pool. The gateway adds it server-side for `SHIFTER_POOL_COUNTRIES` and omits it for `GLOBAL_POOL_COUNTRIES`, which use the global pool. Visitors cannot choose or override the pool; it follows from the country.
 
 Account syntax and SOCKS5 credential lengths are validated. Authentication failures do not trigger a direct-connect fallback. Authenticated upstream sockets are not shared between sessions.
 

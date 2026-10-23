@@ -1,6 +1,6 @@
 use crate::{
     State, captcha,
-    config::{COUNTRIES, Integration, random_id, valid_country},
+    config::{Integration, countries, find_integration, random_id, valid_country},
     store::{Session, Store},
 };
 use axum::{
@@ -47,31 +47,28 @@ fn bad_input(_: JsonRejection) -> Error {
         "Invalid request body",
     )
 }
-fn integration<'a>(h: &HeaderMap, s: &'a State) -> Result<&'a Integration> {
+/// Resolve the requesting integration and the concrete origin it matched.
+fn integration<'a>(h: &HeaderMap, s: &'a State) -> Result<(&'a Integration, String)> {
     let origin = h.get("origin").and_then(|h| h.to_str().ok());
     // Browsers omit Origin on same-origin GETs. Require their Fetch Metadata signal
-    // and an exact configured Host; cross-origin and mutating requests use Origin.
+    // and a configured Host; cross-origin and mutating requests use Origin.
     let same_origin = origin.is_none()
         && h.get("sec-fetch-site").and_then(|h| h.to_str().ok()) == Some("same-origin");
-    s.cfg
-        .integrations
-        .iter()
-        .find(|i| {
-            if origin == Some(i.origin.as_str()) {
-                return true;
-            }
-            if !same_origin {
-                return false;
-            }
-            let parsed = url::Url::parse(&i.origin).unwrap();
-            let host = &i.origin[parsed.scheme().len() + 3..];
-            h.get("host").and_then(|h| h.to_str().ok()) == Some(host)
-        })
-        .ok_or(Error(
-            StatusCode::FORBIDDEN,
-            "ORIGIN_DENIED",
-            "This website is not allowed",
-        ))
+    let found = match (origin, h.get("host").and_then(|h| h.to_str().ok())) {
+        (Some(origin), _) => {
+            find_integration(&s.cfg.integrations, origin).map(|i| (i, origin.to_owned()))
+        }
+        (None, Some(host)) if same_origin => ["https", "http"].iter().find_map(|scheme| {
+            let origin = format!("{scheme}://{host}");
+            find_integration(&s.cfg.integrations, &origin).map(|i| (i, origin))
+        }),
+        _ => None,
+    };
+    found.ok_or(Error(
+        StatusCode::FORBIDDEN,
+        "ORIGIN_DENIED",
+        "This website is not allowed",
+    ))
 }
 
 fn digest(value: &str) -> String {
@@ -110,7 +107,7 @@ async fn identity(h: &HeaderMap, s: &State, site: &str) -> Result<Option<(String
     Ok(Some((key, identity)))
 }
 async fn session(h: &HeaderMap, s: &State) -> Result<Session> {
-    let site = &integration(h, s)?.site;
+    let site = &integration(h, s)?.0.site;
     let (_, id) = identity(h, s, site).await?.ok_or_else(unauthorized)?;
     s.store
         .get(&Store::key(&format!("{}:{}", id.site, id.visitor)))
@@ -167,12 +164,12 @@ fn country(value: &str) -> Result<()> {
 }
 
 pub fn router(s: &State) -> Router<State> {
-    let origins: Vec<HeaderValue> = s
-        .cfg
-        .integrations
-        .iter()
-        .map(|i| i.origin.parse().unwrap())
-        .collect();
+    let integrations = s.cfg.integrations.clone();
+    let origins = tower_http::cors::AllowOrigin::predicate(move |origin: &HeaderValue, _| {
+        origin
+            .to_str()
+            .is_ok_and(|origin| find_integration(&integrations, origin).is_some())
+    });
     let cors = tower_http::cors::CorsLayer::new()
         .allow_origin(origins)
         .allow_methods([Method::GET, Method::POST, Method::DELETE])
@@ -189,9 +186,9 @@ pub fn router(s: &State) -> Router<State> {
         .layer(cors)
 }
 async fn config(AppState(s): AppState<State>, h: HeaderMap) -> Result<Json<Value>> {
-    let site = integration(&h, &s)?;
+    let (site, _) = integration(&h, &s)?;
     Ok(Json(
-        json!({"site":site.site, "countries":COUNTRIES.iter().map(|(code,name)|json!({"code":code,"name":name})).collect::<Vec<_>>(),
+        json!({"site":site.site, "countries":countries().iter().map(|(code,name)|json!({"code":code,"name":name})).collect::<Vec<_>>(),
         "runtimeOrigin":s.cfg.runtime_origin,"captchaSiteKey":s.cfg.captcha_site_key,"protocolVersion":1}),
     ))
 }
@@ -200,7 +197,7 @@ async fn start(
     h: HeaderMap,
     input: std::result::Result<Json<Start>, JsonRejection>,
 ) -> Result<Json<Value>> {
-    let site = integration(&h, &s)?;
+    let (site, origin) = integration(&h, &s)?;
     let Json(input) = input.map_err(bad_input)?;
     country(&input.country)?;
     if input.captcha_token.is_empty() || input.captcha_token.len() > 8192 {
@@ -211,7 +208,7 @@ async fn start(
         ));
     }
     let existing = identity(&h, &s, &site.site).await?;
-    let hostname = url::Url::parse(&site.origin)
+    let hostname = url::Url::parse(&origin)
         .unwrap()
         .host_str()
         .unwrap()

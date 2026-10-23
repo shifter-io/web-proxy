@@ -1,6 +1,6 @@
 use crate::{
     State,
-    config::{COUNTRIES, is_id, random_id, valid_country},
+    config::{self, is_id, random_id, valid_country},
     store::{Session, Store},
 };
 use axum::{
@@ -133,7 +133,7 @@ pub async fn metrics(AxumState(s): AxumState<State>) -> Json<Value> {
 }
 async fn countries(AxumState(s): AxumState<State>) -> Json<Value> {
     Json(
-        json!({"countries":COUNTRIES.iter().map(|(code,name)|json!({"code":code,"name":name})).collect::<Vec<_>>(),
+        json!({"countries":config::countries().iter().map(|(code,name)|json!({"code":code,"name":name})).collect::<Vec<_>>(),
         "runtimeOrigin":s.cfg.runtime_origin,"developmentIdentity":true,"testMode":s.cfg.test_mode}),
     )
 }
