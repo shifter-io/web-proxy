@@ -50,7 +50,7 @@ await api('session',{credential:staged.credential,origin:origins[1],expected:401
 await api('session',{credential:first.credential,origin:origins[1],expected:401});
 await api('session',{expected:401});
 await api('session',{credential:'a'.repeat(64),expected:401});
-const key=`daily:shifter:${identity.visitor}:${Math.floor(Date.now()/86400000)}`;
+const key=`daily:shifter:${identity.visitor}:rolling`;
 await redis('HSET',key,'used','1000');
 await redis('EXPIRE',`identity:${hash(first.credential)}`,'60');
 await api('session',{method:'DELETE',credential:first.credential});
@@ -95,7 +95,7 @@ await redis('HSET',key,'used',String(first.session.byteLimit));
 await api('session/recover',{method:'POST',credential,body:{...recovery,revision:revision+1},expected:410});
 await redis('HSET',key,'used','1000','stopped','1');
 await api('session/recover',{method:'POST',credential,body:{...recovery,revision:revision+1},expected:410});
-await redis('HSET',key,'stopped','0','exp',String(Date.now()-1));
+await redis('HSET',key,'stopped','0','period','0','exp',String(Date.now()-1));
 await api('session/recover',{method:'POST',credential,body:{...recovery,revision:revision+1},expected:410});
 console.log('PASS recovery: gateway-attested SID rotation, WebSocket assignment retention, concurrent/stale rejection, two-attempt budget, country/expiry/quota preservation, stopped/expired/exhausted denial');
 const sdk=await fetch(base+'/sdk/v1/shifter-web-proxy.js');assert.equal(sdk.status,200);assert.match(sdk.headers.get('cache-control'),/no-cache/);

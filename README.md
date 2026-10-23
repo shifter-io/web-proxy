@@ -54,7 +54,7 @@ Shifter Web Proxy puts those checks in a browser page: choose a location, open a
 | **Embeddable JavaScript SDK** | Add the browsing experience to an authorized website with your own controls. |
 | **Inspectable implementation** | Review the Rust services, session enforcement, and browser integration. |
 
-The default free allowance is **up to 30 minutes and 100 MiB per day**. File downloads are disabled in the browsing interface. Website compatibility varies; the proxy does not guarantee access to every destination or support for every sign-in or video flow.
+The default free allowance is **continuous browsing with 10 GB of traffic every 24 hours**. The countdown renews automatically every 24 hours from the start of the allowance. Using all 10 GB pauses browsing until the next period. File downloads are disabled in the browsing interface. Website compatibility varies; the proxy does not guarantee access to every destination or support for every sign-in or video flow.
 
 ## How to use the online proxy
 
@@ -179,6 +179,8 @@ node scripts/build-sdk.mjs
 python3 scripts/render-readme.py
 ```
 
+SDK 1.0.10 keeps the browsing page open when the 24-hour countdown renews. Deploy the API, gateways and SDK together, set `SESSION_SECONDS=86400` and `BYTE_LIMIT=10000000000` in existing deployment overrides, and refresh open tabs. The hosted stable script URL picks up this release on page reload; copied or pinned SDKs need updating. Existing daily records migrate once, preserving consumed traffic and explicit Stop; their old transports must reconnect. The upstream sticky-IP lifetime remains separate from browsing time.
+
 SDK 1.0.6 detects an unresponsive browsing runtime and attempts bounded recovery within the existing session. SDK API requests retain cancellation and timeouts without requiring modern AbortSignal helpers. The runtime supports older Android engines without SharedWorkers or IndexedDB database enumeration, bounds browser setup waits, and keeps failed cleanup mandatory on Reload. The current runtime uses libcurl transport, bundles its domain suffix data, and retries an interrupted successful script or stylesheet response once. Proxied pages use their normal rendering fallback instead of native View Transitions to avoid a reproduced Chrome compositor crash. The gateway queues short connection bursts and flushes upload flow-control credits. Existing deployment overrides must be updated separately.
 
 The [engineering guide](docs/engineering.html) covers architecture, API contracts, session limits, isolation, and troubleshooting. See [testing and validation](docs/engineering.html#testing-and-validation) for container integration checks and bounded live smoke tests.
@@ -200,7 +202,7 @@ The banner uses the site's Geist font and Shifter logo. To regenerate it, instal
 
 ### Is this web proxy free?
 
-The visitor interface provides free browsing with a default allowance of up to 30 minutes and 100 MiB per day. No visitor account is required; verification protects access. Self-hosting still requires infrastructure and a Shifter account for live residential traffic.
+The visitor interface provides free browsing with a default allowance of continuous browsing with 10 GB of traffic every 24 hours. No visitor account is required; verification protects access. Self-hosting still requires infrastructure and a Shifter account for live residential traffic.
 
 ### What is an online proxy site?
 

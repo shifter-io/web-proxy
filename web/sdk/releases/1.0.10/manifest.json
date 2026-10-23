@@ -1,0 +1,8 @@
+{
+  "version": "1.0.10",
+  "protocolVersion": 1,
+  "sha256": {
+    "captcha.js": "e89d4e57e18de849a4a406829916fee2dbaa81ae2f37e0eedd15e9b3a812935a",
+    "client.js": "fe782094308a5c5a92418d10b771d682fbd0fa018178d502f874df20086370d9"
+  }
+}

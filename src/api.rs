@@ -1,7 +1,7 @@
 use crate::{
     State,
     config::{self, is_id, random_id, valid_country},
-    store::{Session, Store},
+    store::Session,
 };
 use axum::{
     Json, Router,
@@ -52,7 +52,7 @@ async fn session(headers: &HeaderMap, state: &State) -> Result<Session, ApiError
     ))?;
     state
         .store
-        .get(&Store::key(&v))
+        .current(&v, &state.cfg)
         .await
         .map_err(storage_error)?
         .ok_or(ApiError(StatusCode::NOT_FOUND, "No browsing session"))

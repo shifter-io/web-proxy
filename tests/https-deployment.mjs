@@ -135,7 +135,7 @@ try {
   // Seed a verified identity directly in disposable private storage, never via a production bypass.
   const credential=randomBytes(32).toString('hex'), visitor=randomBytes(16).toString('hex');
   await rcmd('SETEX',`identity:${createHash('sha256').update(credential).digest('hex')}`,'3600',JSON.stringify({site:'shifter',visitor}));
-  const key=`daily:shifter:${visitor}:${Math.floor(Date.now()/86400000)}`;
+  const key=`daily:shifter:${visitor}:rolling`;
   await rcmd('HSET',key,'country','us','sid',randomBytes(16).toString('hex'),'region','blr','exp',String(Date.now()+600000),'rev','1','used','0','limit','104857600','stopped','0');
   const apiHeaders={Origin:`https://${control}`,Authorization:`Bearer ${credential}`};
   const status=await request(runtime,'/api/v1/session',{headers:apiHeaders});

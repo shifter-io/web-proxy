@@ -1,3 +1,4 @@
+import {formatTime, formatTraffic} from './allowance.js';
 import {initShifterReveals} from './shifter-reveal.js';
 import {renderCountryOrbits} from './country-orbits.js';
 import {renderCountryMarquee} from './country-marquee.js';
@@ -34,8 +35,8 @@ proxy.subscribe(state => {
   $('status').textContent = labels[state.status] || 'Ready to browse';
   $('session-menu').querySelector('summary').title = $('status').textContent + ' · Session details and browser controls';
   const seconds = state.remainingSeconds || 0;
-  allowance('timer',`${Math.floor(seconds/60).toString().padStart(2,'0')}:${(seconds%60).toString().padStart(2,'0')}`);
-  allowance('traffic',`${((state.session?.remainingBytes || 0)/1048576).toFixed(1)} MiB`);
+  allowance('timer',formatTime(seconds));
+  allowance('traffic',formatTraffic(state.session?.remainingBytes));
   $('go').disabled = state.busy || !configured;
   countryPicker.setDisabled(state.busy || !configured);
   for (const id of ['back','forward','reload','stop']) $(id).disabled = state.busy || !state.active;
