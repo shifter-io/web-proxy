@@ -8,23 +8,20 @@ use anyhow::{Result, bail};
 use axum::{
     extract::{
         Query, State as AxumState,
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode},
     response::Response,
 };
-use bytes::Bytes;
-use futures_util::{Sink, SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::{
-    net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::TcpStream,
     sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore},
     task::JoinSet,
     time::timeout,
@@ -36,87 +33,11 @@ use wisp_mux::{
     stream::MuxStream,
 };
 
-struct AxumTransport {
-    socket: WebSocket,
-    ping: tokio::time::Interval,
-    flushing: bool,
-}
-impl futures_util::Stream for AxumTransport {
-    type Item = Result<Bytes, WispError>;
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        use std::task::Poll;
-        if self.flushing {
-            match Pin::new(&mut self.socket).poll_flush(cx) {
-                Poll::Ready(Ok(())) => self.flushing = false,
-                Poll::Ready(Err(e)) => {
-                    return Poll::Ready(Some(Err(WispError::WsImplError(Box::new(e)))));
-                }
-                Poll::Pending => return Poll::Pending,
-            }
-        }
-        if self.ping.poll_tick(cx).is_ready()
-            && let Poll::Ready(Ok(())) = Pin::new(&mut self.socket).poll_ready(cx)
-        {
-            if let Err(e) = Pin::new(&mut self.socket).start_send(Message::Ping(Bytes::new())) {
-                return Poll::Ready(Some(Err(WispError::WsImplError(Box::new(e)))));
-            }
-            self.flushing = true;
-            cx.waker().wake_by_ref();
-        }
-        loop {
-            match Pin::new(&mut self.socket).poll_next(cx) {
-                Poll::Ready(Some(Ok(Message::Binary(b)))) => return Poll::Ready(Some(Ok(b))),
-                Poll::Ready(Some(Ok(Message::Close(_)))) | Poll::Ready(None) => {
-                    return Poll::Ready(None);
-                }
-                Poll::Ready(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => continue,
-                Poll::Ready(Some(Ok(_))) => {
-                    return Poll::Ready(Some(Err(WispError::PacketTooSmall)));
-                }
-                Poll::Ready(Some(Err(e))) => {
-                    return Poll::Ready(Some(Err(WispError::WsImplError(Box::new(e)))));
-                }
-                Poll::Pending => return Poll::Pending,
-            }
-        }
-    }
-}
-impl Sink<Bytes> for AxumTransport {
-    type Error = WispError;
-    fn poll_ready(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        Pin::new(&mut self.socket)
-            .poll_ready(cx)
-            .map_err(|e| WispError::WsImplError(Box::new(e)))
-    }
-    fn start_send(mut self: Pin<&mut Self>, b: Bytes) -> Result<(), Self::Error> {
-        Pin::new(&mut self.socket)
-            .start_send(Message::Binary(b))
-            .map_err(|e| WispError::WsImplError(Box::new(e)))
-    }
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        Pin::new(&mut self.socket)
-            .poll_flush(cx)
-            .map_err(|e| WispError::WsImplError(Box::new(e)))
-    }
-    fn poll_close(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        Pin::new(&mut self.socket)
-            .poll_close(cx)
-            .map_err(|e| WispError::WsImplError(Box::new(e)))
-    }
-}
-type WsSink = futures_util::stream::SplitSink<AxumTransport, Bytes>;
+mod policy;
+mod socks;
+mod transport;
+
+use transport::{AxumTransport, WsSink};
 
 // Transport flood protection is deliberately separate from upstream admission:
 // a normal page may burst well beyond its sustained connection rate.
@@ -193,12 +114,7 @@ pub async fn upgrade(
 
 async fn run(socket: WebSocket, state: State, session: Session, owner: String) {
     state.metrics.connections.fetch_add(1, Ordering::Relaxed);
-    let (write, read) = AxumTransport {
-        socket,
-        ping: tokio::time::interval(Duration::from_secs(3)),
-        flushing: false,
-    }
-    .split();
+    let (write, read) = AxumTransport::new(socket, Duration::from_secs(3)).split();
     // Bound malformed/CONNECT floods before the library's unbounded stream admission queue.
     let mut frame_window = Instant::now();
     let mut connects = 0u32;
@@ -308,171 +224,6 @@ async fn run(socket: WebSocket, state: State, session: Session, owner: String) {
     state.metrics.connections.fetch_sub(1, Ordering::Relaxed);
 }
 
-/// Only globally routable destinations, including rejecting mapped IPv4 and translation ranges.
-pub fn public_ip(ip: IpAddr) -> bool {
-    let blocked: &[&str] = match ip {
-        IpAddr::V4(_) => &[
-            "0.0.0.0/8",
-            "10.0.0.0/8",
-            "100.64.0.0/10",
-            "127.0.0.0/8",
-            "169.254.0.0/16",
-            "172.16.0.0/12",
-            "192.0.0.0/24",
-            "192.0.2.0/24",
-            "192.88.99.0/24",
-            "192.168.0.0/16",
-            "198.18.0.0/15",
-            "198.51.100.0/24",
-            "203.0.113.0/24",
-            "224.0.0.0/4",
-            "240.0.0.0/4",
-        ],
-        IpAddr::V6(_) => &[
-            "::/96",
-            "::ffff:0:0/96",
-            "64:ff9b::/96",
-            "64:ff9b:1::/48",
-            "100::/64",
-            "2001::/23",
-            "2001:db8::/32",
-            "2002::/16",
-            "3fff::/20",
-            "fc00::/7",
-            "fe80::/10",
-            "ff00::/8",
-        ],
-    };
-    if let IpAddr::V6(v) = ip
-        && (v.segments()[0] & 0xe000) != 0x2000
-    {
-        return false;
-    }
-    !blocked
-        .iter()
-        .any(|cidr| cidr.parse::<ipnet::IpNet>().unwrap().contains(&ip))
-}
-async fn resolve(packet: &ConnectPacket, state: &State) -> Result<IpAddr> {
-    if ![80, 443].contains(&packet.port) {
-        bail!("port blocked");
-    }
-    let host = packet.host.trim_end_matches('.').to_ascii_lowercase();
-    // Reserved fixture destinations never resolve or connect directly. Only the mock proxy sees them.
-    if state.cfg.test_mode && (host == "fixture.test" || host == "second.test") {
-        return Ok("203.0.113.10".parse()?);
-    }
-    if state.cfg.test_mode && host == "failed-upstream.test" {
-        return Ok("203.0.113.11".parse()?);
-    }
-    if host.len() > 253
-        || host.is_empty()
-        || host
-            .bytes()
-            .any(|c| !c.is_ascii_alphanumeric() && !b".-:".contains(&c))
-        || host == "localhost"
-        || host.ends_with(".localhost")
-        || host.ends_with(".local")
-        || host.ends_with(".internal")
-        || host == "shifter.io"
-        || host.ends_with(".shifter.io")
-    {
-        bail!("host blocked");
-    }
-    let addresses = state.resolver.lookup(&host).await?;
-    if addresses.is_empty()
-        || addresses
-            .iter()
-            .any(|x| !public_ip(*x) || state.cfg.upstream_ips.contains(x))
-    {
-        bail!("address blocked");
-    }
-    addresses
-        .iter()
-        .find(|x| x.is_ipv4())
-        .or(addresses.first())
-        .copied()
-        .ok_or_else(|| anyhow::anyhow!("no address"))
-}
-#[derive(Debug)]
-struct UpstreamUnavailable;
-impl std::fmt::Display for UpstreamUnavailable {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("upstream unavailable")
-    }
-}
-impl std::error::Error for UpstreamUnavailable {}
-
-async fn connect(
-    packet: &ConnectPacket,
-    ip: IpAddr,
-    state: &State,
-    session: &Session,
-) -> Result<TcpStream> {
-    let user = state.cfg.username(&session.country, &session.sid)?;
-    // This hostname is shared by every destination stream. Resolving it again
-    // inside TcpStream::connect would still flood DNS despite destination caching.
-    let upstream: Vec<_> = state
-        .resolver
-        .lookup(&state.cfg.upstream_host)
-        .await?
-        .into_iter()
-        .map(|ip| SocketAddr::new(ip, state.cfg.upstream_port))
-        .collect();
-    let mut socket = TcpStream::connect(upstream.as_slice()).await?;
-    socket.set_nodelay(true)?;
-    // RFC 1928 + RFC 1929. All destination connections are opened through this authenticated tunnel.
-    socket.write_all(&[5, 1, 2]).await?;
-    let mut pair = [0; 2];
-    socket.read_exact(&mut pair).await?;
-    if pair != [5, 2] {
-        bail!("upstream authentication method rejected");
-    }
-    let mut auth = Vec::with_capacity(3 + user.len() + state.cfg.password.len());
-    auth.extend_from_slice(&[1, user.len() as u8]);
-    auth.extend_from_slice(user.as_bytes());
-    auth.push(state.cfg.password.len() as u8);
-    auth.extend_from_slice(state.cfg.password.as_bytes());
-    socket.write_all(&auth).await?;
-    auth.fill(0);
-    socket.read_exact(&mut pair).await?;
-    if pair != [1, 0] {
-        bail!("upstream authentication rejected");
-    }
-    let mut request = vec![5, 1, 0];
-    match ip {
-        IpAddr::V4(v) => {
-            request.push(1);
-            request.extend_from_slice(&v.octets());
-        }
-        IpAddr::V6(v) => {
-            request.push(4);
-            request.extend_from_slice(&v.octets());
-        }
-    }
-    request.extend_from_slice(&packet.port.to_be_bytes());
-    socket.write_all(&request).await?;
-    let mut reply = [0; 4];
-    socket.read_exact(&mut reply).await?;
-    if reply[0] != 5 || reply[1] != 0 {
-        if reply[0] == 5 && matches!(reply[1], 1 | 3 | 4 | 5 | 6) {
-            return Err(UpstreamUnavailable.into());
-        }
-        bail!(
-            "upstream destination unavailable (version {}, reply {})",
-            reply[0],
-            reply[1]
-        );
-    }
-    let count = match reply[3] {
-        1 => 4,
-        4 => 16,
-        3 => socket.read_u8().await? as usize,
-        _ => bail!("invalid upstream response"),
-    };
-    let mut ignored = vec![0; count + 2];
-    socket.read_exact(&mut ignored).await?;
-    Ok(socket)
-}
 async fn forward(
     packet: ConnectPacket,
     stream: MuxStream<WsSink>,
@@ -486,7 +237,7 @@ async fn forward(
     // DNS/policy failures are destination failures, never grounds for SID rotation.
     let ip = match timeout(
         Duration::from_secs(state.cfg.connect_timeout),
-        resolve(&packet, &state),
+        policy::resolve(&packet, &state),
     )
     .await
     {
@@ -504,19 +255,14 @@ async fn forward(
     };
     let connection = timeout(
         Duration::from_secs(state.cfg.connect_timeout),
-        connect(&packet, ip, &state, &s),
+        socks::connect(&packet, ip, &state, &s),
     )
     .await;
     let tcp = match connection {
         Ok(Ok(tcp)) => tcp,
         failure => {
             tracing::debug!(?failure, "Upstream connection failed before forwarding");
-            let transient = match failure {
-                Err(_) => true,
-                Ok(Err(error)) => error.is::<std::io::Error>() || error.is::<UpstreamUnavailable>(),
-                _ => false,
-            };
-            if transient
+            if socks::transient(&failure)
                 && state
                     .store
                     .upstream_failed(&s, &owner, &packet.host)
@@ -678,30 +424,5 @@ mod tests {
             .is_err()
         );
         assert_eq!(permits.available_permits(), 1);
-    }
-
-    #[test]
-    fn destination_policy() {
-        for s in [
-            "127.0.0.1",
-            "10.2.3.4",
-            "100.64.0.1",
-            "169.254.169.254",
-            "192.168.1.1",
-            "198.18.0.1",
-            "203.0.113.1",
-            "224.0.0.1",
-            "::1",
-            "::ffff:127.0.0.1",
-            "64:ff9b::7f00:1",
-            "fd00::1",
-            "fe80::1",
-            "2001:db8::1",
-        ] {
-            assert!(!public_ip(s.parse().unwrap()), "{s}");
-        }
-        for s in ["1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"] {
-            assert!(public_ip(s.parse().unwrap()), "{s}");
-        }
     }
 }
