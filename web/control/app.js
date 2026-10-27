@@ -7,8 +7,10 @@ initShifterReveals();
 const $ = id => document.getElementById(id);
 const countryPicker = new CountryPicker();
 const proxy = ShifterWebProxy.create({container:$('runtime-host'), ...(window.SHIFTER_API_ORIGIN ? {apiOrigin:window.SHIFTER_API_ORIGIN} : {})});
-let current = proxy.getState(), configured = false, landingScroll = 0, countriesLoaded = false, loading = false;
+let current = proxy.getState(), configured = false, landingScroll = 0, countriesLoaded = false, loading = false, pageNotice = '';
 function notice(text = '') { $('notice').textContent = text; $('notice').hidden = !text; }
+// Page notices stay until the visitor's next action; SDK state emissions (such as the clock) keep them.
+function announce(text) { pageNotice = text; notice(text); }
 function allowance(id, text) { $(id).textContent = text; $('menu-' + id).textContent = text; }
 function browserMode(on) {
   if (on && !document.body.classList.contains('is-browsing')) landingScroll = window.scrollY;
@@ -51,12 +53,13 @@ proxy.subscribe(state => {
     $('page-loading').hidden = !loading;
     $('viewport').setAttribute('aria-busy', String(loading));
   }
-  notice(state.error?.message || (state.persistent === false ? 'Browser storage is unavailable. Your session will not be remembered after this page closes.' : ''));
+  notice(state.error?.message || pageNotice || (state.persistent === false ? 'Browser storage is unavailable. Your session will not be remembered after this page closes.' : ''));
   if (ended) browserMode(true);
 });
 async function run(action) {
+  pageNotice = '';
   try { await action(); }
-  catch (error) { if (error.code !== 'CANCELLED') notice(error.message); }
+  catch (error) { if (error.code !== 'CANCELLED') announce(error.message); }
 }
 $('navigate').addEventListener('submit', event => {
   event.preventDefault(); if (current.busy || !configured) return;
@@ -69,7 +72,7 @@ $('navigate').addEventListener('submit', event => {
 $('country').addEventListener('change', () => {
   if (!current.active || current.busy) return;
   run(async () => {
-    try { await proxy.changeCountry($('country').value); notice('Location changed. You may need to sign in to the website again.'); }
+    try { await proxy.changeCountry($('country').value); announce('Location changed. You may need to sign in to the website again.'); }
     catch (error) { countryPicker.setValue(current.country); throw error; }
   });
 });
