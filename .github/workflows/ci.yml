@@ -1,14 +1,16 @@
 # Merge gate (Tier 1) on the shared self-hosted CI pool. GitHub-hosted runners are never used.
+# Every job runs on [self-hosted, ci-heavy]: the pool's machines are identical and each carries every
+# label, so no job names a specific machine.
 #
-# Jobs, on the pool label in brackets:
-# - changes [ci-light]: picks the jobs a pull request needs from its changed files
+# Jobs:
+# - changes: picks the jobs a pull request needs from its changed files
 #   (.github/scripts/changed-scope.sh).
-# - policy [ci-light]: repository policy (.github/scripts/repo-policy.sh), docs/*.html in sync with
+# - policy: repository policy (.github/scripts/repo-policy.sh), docs/*.html in sync with
 #   README.md and ENGINEERING.md (scripts/render-readme.py), and actionlint. Always runs.
-# - rust [ci-heavy]: cargo fmt, clippy with warnings denied and cargo test on Rust 1.94.1, the
+# - rust: cargo fmt, clippy with warnings denied and cargo test on Rust 1.94.1, the
 #   Dockerfile's build-stage version.
-# - node [ci-light]: npm ci, node --test tests/*.test.mjs and scripts/vendor.mjs on Node 24.
-# - npm-audit [ci-light]: npm audit of package-lock.json at level high.
+# - node: npm ci, node --test tests/*.test.mjs and scripts/vendor.mjs on Node 24.
+# - npm-audit: npm audit of package-lock.json at level high.
 # A documentation-only pull request runs only changes and policy; rust, node and npm-audit run when
 # their inputs change, and everything runs when .github/ changes. Pushes to main, the nightly
 # schedule and manual runs run everything. Draft pull requests run nothing until marked ready.
@@ -52,7 +54,7 @@ jobs:
   changes:
     name: changes
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    runs-on: [self-hosted, ci-light]
+    runs-on: [self-hosted, ci-heavy]
     timeout-minutes: 30
     outputs:
       rust: ${{ steps.scope.outputs.rust }}
@@ -82,7 +84,7 @@ jobs:
   policy:
     name: policy
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    runs-on: [self-hosted, ci-light]
+    runs-on: [self-hosted, ci-heavy]
     timeout-minutes: 35
     env:
       ACTIONLINT_VERSION: 1.7.12
@@ -177,7 +179,7 @@ jobs:
     name: node
     needs: changes
     if: needs.changes.outputs.node == 'true'
-    runs-on: [self-hosted, ci-light]
+    runs-on: [self-hosted, ci-heavy]
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -214,7 +216,7 @@ jobs:
     name: npm-audit
     needs: changes
     if: needs.changes.outputs.audit == 'true'
-    runs-on: [self-hosted, ci-light]
+    runs-on: [self-hosted, ci-heavy]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

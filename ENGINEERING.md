@@ -580,15 +580,15 @@ The gateway binds sessions to their assigned region and rejects a region mismatc
 
 ### Continuous integration
 
-`.github/workflows/ci.yml` runs the merge gate on the shared self-hosted CI runners (labels `ci-heavy` and `ci-light`; GitHub-hosted runners are never used). It runs on every ready pull request (drafts are skipped until marked ready), every push to `main`, nightly on `main` and on manual dispatch. Each run checks the pull request's own head commit.
+`.github/workflows/ci.yml` runs the merge gate on the shared self-hosted CI runners; every job uses `runs-on: [self-hosted, ci-heavy]` and never names a specific machine (the pool's machines are identical and carry every label; GitHub-hosted runners are never used). It runs on every ready pull request (drafts are skipped until marked ready), every push to `main`, nightly on `main` and on manual dispatch. Each run checks the pull request's own head commit.
 
-| Job | Runner label | Checks |
-| --- | --- | --- |
-| `changes` | `ci-light` | Selects the jobs a pull request needs from its changed files (`.github/scripts/changed-scope.sh`) |
-| `policy` | `ci-light` | Repository policy (`.github/scripts/repo-policy.sh`), `docs/*.html` in sync with the Markdown, actionlint |
-| `rust` | `ci-heavy` | `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked` |
-| `node` | `ci-light` | `npm ci --ignore-scripts`, `node --test tests/*.test.mjs`, `node scripts/vendor.mjs` |
-| `npm-audit` | `ci-light` | `npm audit --audit-level=high --package-lock-only` |
+| Job | Checks |
+| --- | --- |
+| `changes` | Selects the jobs a pull request needs from its changed files (`.github/scripts/changed-scope.sh`) |
+| `policy` | Repository policy (`.github/scripts/repo-policy.sh`), `docs/*.html` in sync with the Markdown, actionlint |
+| `rust` | `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked` |
+| `node` | `npm ci --ignore-scripts`, `node --test tests/*.test.mjs`, `node scripts/vendor.mjs` |
+| `npm-audit` | `npm audit --audit-level=high --package-lock-only` |
 
 A pull request that changes only documentation (`docs/`, `.cursor/`, README.md, ENGINEERING.md, AGENTS.md, LICENSE and the documentation scripts) runs only `changes` and `policy`. `node` runs for any other change, `rust` when `src/`, the Cargo files or the Dockerfile change, `npm-audit` when `package.json` or `package-lock.json` changes, and every job runs when `.github/` changes. Pushes, nightly and manual runs run every job. When branch protection is enabled, require all five jobs, including `changes`: if it fails, the jobs that depend on it are reported as skipped, which GitHub treats as passing.
 
