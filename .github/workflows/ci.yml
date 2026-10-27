@@ -14,6 +14,8 @@
 # schedule and manual runs run everything. Draft pull requests run nothing until marked ready.
 # Make changes required together with the other jobs: when it fails, the jobs that need it show as
 # skipped, and GitHub counts a skipped job as passed.
+# Each timeout-minutes includes up to 25 minutes in which the runner's job-started hook waits for
+# a free machine slot on the shared pool; the jobs themselves take a few minutes.
 # Caches persist on each runner under $CI_CACHE_DIR/web-proxy/: target/rust (Cargo target
 # directory), npm (npm cache) and tools/ (the verified actionlint download).
 # Not run here: Docker stack tests, browser tests, the credential scan (tests/secret-scan.py) and
@@ -51,7 +53,7 @@ jobs:
     name: changes
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: [self-hosted, ci-light]
-    timeout-minutes: 5
+    timeout-minutes: 30
     outputs:
       rust: ${{ steps.scope.outputs.rust }}
       node: ${{ steps.scope.outputs.node }}
@@ -81,7 +83,7 @@ jobs:
     name: policy
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: [self-hosted, ci-light]
-    timeout-minutes: 10
+    timeout-minutes: 35
     env:
       ACTIONLINT_VERSION: 1.7.12
       ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
@@ -130,7 +132,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     runs-on: [self-hosted, ci-heavy]
-    timeout-minutes: 40
+    timeout-minutes: 65
     env:
       # Same version as the Dockerfile's build stage; change both together (checked below).
       RUSTUP_TOOLCHAIN: 1.94.1
@@ -176,7 +178,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.node == 'true'
     runs-on: [self-hosted, ci-light]
-    timeout-minutes: 15
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -213,7 +215,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.audit == 'true'
     runs-on: [self-hosted, ci-light]
-    timeout-minutes: 5
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
