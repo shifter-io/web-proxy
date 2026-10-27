@@ -124,3 +124,18 @@ mod tests {
         assert_eq!(resolver.entries.lock().await.len(), CAPACITY);
     }
 }
+
+// DO NOT MERGE: deliberate defects proving that the CI gate fails.
+#[cfg(test)]
+mod red_proof {
+    fn  badly_formatted ( ) -> usize { 3 }
+
+    fn needless_return() -> usize {
+        return badly_formatted();
+    }
+
+    #[test]
+    fn deliberately_fails() {
+        assert_eq!(needless_return(), 4, "CI red proof");
+    }
+}
