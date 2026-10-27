@@ -1,0 +1,227 @@
+# Merge gate (Tier 1) on the shared self-hosted CI pool. GitHub-hosted runners are never used.
+#
+# Jobs, on the pool label in brackets:
+# - changes [ci-light]: picks the jobs a pull request needs from its changed files
+#   (.github/scripts/changed-scope.sh).
+# - policy [ci-light]: repository policy (.github/scripts/repo-policy.sh), docs/*.html in sync with
+#   README.md and ENGINEERING.md (scripts/render-readme.py), and actionlint. Always runs.
+# - rust [ci-heavy]: cargo fmt, clippy with warnings denied and cargo test on Rust 1.94.1, the
+#   Dockerfile's build-stage version.
+# - node [ci-light]: npm ci, node --test tests/*.test.mjs and scripts/vendor.mjs on Node 24.
+# - npm-audit [ci-light]: npm audit of package-lock.json at level high.
+# A documentation-only pull request runs only changes and policy; rust, node and npm-audit run when
+# their inputs change, and everything runs when .github/ changes. Pushes to main, the nightly
+# schedule and manual runs run everything. Draft pull requests run nothing until marked ready.
+# Make changes required together with the other jobs: when it fails, the jobs that need it show as
+# skipped, and GitHub counts a skipped job as passed.
+# Caches persist on each runner under $CI_CACHE_DIR/web-proxy/: target/rust (Cargo target
+# directory), npm (npm cache) and tools/ (the verified actionlint download).
+# Not run here: Docker stack tests, browser tests, the credential scan (tests/secret-scan.py) and
+# live smoke tests. Run them locally as ENGINEERING.md "Testing and validation" describes.
+name: ci
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  schedule:
+    - cron: '23 2 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # Results bind the pull request's own head (the commit that merges), not GitHub's merge commit.
+  HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  changes:
+    name: changes
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: [self-hosted, ci-light]
+    timeout-minutes: 5
+    outputs:
+      rust: ${{ steps.scope.outputs.rust }}
+      node: ${{ steps.scope.outputs.node }}
+      audit: ${{ steps.scope.outputs.audit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.HEAD_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Changed scope
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          changed="$RUNNER_TEMP/changed-files"
+          if [ "$EVENT" = pull_request ]; then
+            git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" > "$changed"
+          else
+            : > "$changed"
+          fi
+          echo "event=$EVENT head=$HEAD_SHA base=${BASE_SHA:-none} changed files: $(grep -c . "$changed" || true)"
+          bash .github/scripts/changed-scope.sh "$EVENT" < "$changed" | tee -a "$GITHUB_OUTPUT"
+
+  policy:
+    name: policy
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: [self-hosted, ci-light]
+    timeout-minutes: 10
+    env:
+      ACTIONLINT_VERSION: 1.7.12
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.HEAD_SHA }}
+          persist-credentials: false
+      - name: Repository policy
+        run: bash .github/scripts/repo-policy.sh
+      - name: Documentation sync
+        run: |
+          python3 scripts/render-readme.py
+          if ! git diff --exit-code -- docs/readme.html docs/engineering.html; then
+            echo "::error::docs/readme.html or docs/engineering.html is stale; run python3 scripts/render-readme.py and commit the result"
+            exit 1
+          fi
+      - name: actionlint
+        run: |
+          : "${CI_CACHE_DIR:?the runner must set CI_CACHE_DIR}"
+          if [ "$RUNNER_ARCH" != X64 ]; then
+            echo "::error::actionlint is pinned for linux_amd64, not $RUNNER_ARCH"
+            exit 1
+          fi
+          name="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          tools="$CI_CACHE_DIR/web-proxy/tools"
+          verify() { echo "$ACTIONLINT_SHA256  $1" | sha256sum --check --quiet -; }
+          tarball="$tools/$name"
+          if ! [ -f "$tarball" ] || ! verify "$tarball"; then
+            rm -f "$tarball"
+            tarball="$RUNNER_TEMP/$name"
+            curl -fsSL --retry 3 -o "$tarball" \
+              "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/$name"
+            verify "$tarball"
+            # Copy under a temporary name, then rename, so the cache never holds a partial file.
+            mkdir -p "$tools"
+            cp "$tarball" "$tools/.$name.$$"
+            mv -f "$tools/.$name.$$" "$tools/$name"
+          fi
+          tar -xzf "$tarball" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -version
+          "$RUNNER_TEMP/actionlint"
+
+  rust:
+    name: rust
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: [self-hosted, ci-heavy]
+    timeout-minutes: 40
+    env:
+      # Same version as the Dockerfile's build stage; change both together (checked below).
+      RUSTUP_TOOLCHAIN: 1.94.1
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.HEAD_SHA }}
+          persist-credentials: false
+      - name: Cargo target directory
+        run: |
+          : "${CI_CACHE_DIR:?the runner must set CI_CACHE_DIR}"
+          echo "CARGO_TARGET_DIR=$CI_CACHE_DIR/web-proxy/target/rust" >> "$GITHUB_ENV"
+      - name: Toolchain matches the Dockerfile
+        run: |
+          if ! grep -qF "FROM rust:${RUSTUP_TOOLCHAIN}-" Dockerfile; then
+            echo "::error::RUSTUP_TOOLCHAIN $RUSTUP_TOOLCHAIN differs from the Dockerfile's rust image; change both together"
+            exit 1
+          fi
+      - name: Install toolchain
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
+          rustc --version
+          cargo --version
+          echo "CARGO_TARGET_DIR=$CARGO_TARGET_DIR"
+      - name: cargo fmt
+        run: cargo fmt --check
+      - name: cargo clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: cargo test
+        run: |
+          log="$RUNNER_TEMP/cargo-test.log"
+          cargo test --locked 2>&1 | tee "$log"
+          results=$(sed 's/\x1b\[[0-9;]*m//g' "$log" | grep '^test result:' || true)
+          printf '%s\n' "$results" >> "$GITHUB_STEP_SUMMARY"
+          if ! grep -Eq '^test result: ok\. [1-9][0-9]* passed' <<< "$results"; then
+            echo "::error::cargo test reported no passing test"
+            exit 1
+          fi
+
+  node:
+    name: node
+    needs: changes
+    if: needs.changes.outputs.node == 'true'
+    runs-on: [self-hosted, ci-light]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.HEAD_SHA }}
+          persist-credentials: false
+      - name: npm cache and Node version
+        run: |
+          : "${CI_CACHE_DIR:?the runner must set CI_CACHE_DIR}"
+          echo "npm_config_cache=$CI_CACHE_DIR/web-proxy/npm" >> "$GITHUB_ENV"
+          node --version
+          npm --version
+          major=$(node -p 'process.versions.node.split(".")[0]')
+          if [ "$major" != 24 ]; then
+            echo "::error::Node 24 is required, as in the Dockerfile's web stage"
+            exit 1
+          fi
+      - name: npm ci
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Node tests
+        run: |
+          tap="$RUNNER_TEMP/node-tests.tap"
+          node --test --test-reporter=spec --test-reporter-destination=stdout \
+            --test-reporter=tap --test-reporter-destination="$tap" tests/*.test.mjs
+          grep -E '^# (tests|pass|fail|skipped|todo) ' "$tap" >> "$GITHUB_STEP_SUMMARY" || true
+          if ! grep -Eq '^# pass [1-9][0-9]*$' "$tap"; then
+            echo "::error::node --test reported no passing test"
+            exit 1
+          fi
+      - name: Vendor browser dependencies
+        run: node scripts/vendor.mjs
+
+  npm-audit:
+    name: npm-audit
+    needs: changes
+    if: needs.changes.outputs.audit == 'true'
+    runs-on: [self-hosted, ci-light]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.HEAD_SHA }}
+          persist-credentials: false
+      - name: npm cache
+        run: |
+          : "${CI_CACHE_DIR:?the runner must set CI_CACHE_DIR}"
+          echo "npm_config_cache=$CI_CACHE_DIR/web-proxy/npm" >> "$GITHUB_ENV"
+      - name: npm audit
+        run: npm audit --audit-level=high --package-lock-only
