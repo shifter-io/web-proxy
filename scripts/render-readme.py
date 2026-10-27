@@ -8,10 +8,10 @@ heading ids must be unique, `#fragment` links must name a heading of the same
 document, relative paths must stay inside the repository and name a tracked
 file or directory, and fragments are allowed only on README.md, ENGINEERING.md
 and their docs/*.html renderings. Links with a scheme (https:, mailto:) are not
-checked. Without arguments the script writes both pages (exit 0) or prints
-`file:line` errors and writes nothing (exit 1); `--check` writes nothing and
-exits 1 when a page under docs/ is missing or out of date; any other argument
-exits 2.
+checked; header images must be existing SVG files inside the repository.
+Without arguments the script writes both pages (exit 0) or prints `file:line`
+errors and writes nothing (exit 1); `--check` writes nothing and exits 1 when
+a page under docs/ is missing or out of date; any other argument exits 2.
 """
 from pathlib import Path
 from typing import NamedTuple
@@ -38,6 +38,13 @@ SCHEME = re.compile(r'^[a-zA-Z][a-zA-Z0-9+.-]*:')
 USAGE = 'usage: python3 scripts/render-readme.py [--check]'
 
 
+class HeaderImageError(ValueError):
+    """A header `src` that is not an existing SVG file inside the repository; the message starts with its line."""
+
+    def __init__(self, line, value):
+        super().__init__(f'{line}: header image "{value}" must be an existing local SVG file')
+
+
 class Rendered(NamedTuple):
     blocks: list[str]
     ids: list[tuple[int, str]]
@@ -58,10 +65,8 @@ def header_html(source, line, links):
         value = html.unescape(match[1])
         links.append((line, value))
         path = (root / value).resolve()
-        if not path.is_file():
-            return match[0]  # reported by link validation; nothing is written
-        if not path.is_relative_to(root) or path.suffix != '.svg':
-            raise ValueError('README header images must be local SVG files')
+        if not path.is_relative_to(root) or path.suffix != '.svg' or not path.is_file():
+            raise HeaderImageError(line, value)
         encoded = base64.b64encode(path.read_bytes()).decode('ascii')
         return 'src="data:image/svg+xml;base64,' + encoded + '"'
 
@@ -253,8 +258,13 @@ def main(argv):
     if argv not in ([], ['--check']):
         print(USAGE, file=sys.stderr)
         return 2
-    rendered = {source: render_document((root / source).read_text(encoding='utf-8').splitlines())
-                for source, _, _ in DOCUMENTS}
+    rendered = {}
+    for source, _, _ in DOCUMENTS:
+        try:
+            rendered[source] = render_document((root / source).read_text(encoding='utf-8').splitlines())
+        except HeaderImageError as error:
+            print(f'{source}:{error}', file=sys.stderr)
+            return 1
     ids_by_doc = {source: {anchor for _, anchor in doc.ids} for source, doc in rendered.items()}
     tracked = tracked_paths()
     errors = [error for source, doc in rendered.items()

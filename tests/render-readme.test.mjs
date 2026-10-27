@@ -180,3 +180,15 @@ test('D12 an unknown argument prints usage and exits 2', t => {
   assert.match(result.stderr, /^usage: /);
   assert.deepEqual(htmlFiles(dir), []);
 });
+
+test('D13 a header image that is not an existing local SVG file fails and writes nothing', t => {
+  for (const src of ['https://example.com/x.svg', 'scripts', 'docs/assets/header.svg']) {
+    const {dir, render} = fixture(t, {
+      'README.md': `<p align="center">\n  <img src="${src}" alt="Header">\n</p>\n\n# Fixture\n`,
+      'docs/assets/header.svg': '<svg xmlns="http://www.w3.org/2000/svg"></svg>\n',
+    }, {git: true});
+    if (src === 'docs/assets/header.svg') rmSync(join(dir, src)); // tracked, then deleted
+    assertFails(render(), `README.md:1: header image "${src}" must be an existing local SVG file`);
+    assert.deepEqual(htmlFiles(dir), [], src);
+  }
+});
