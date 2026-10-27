@@ -1,0 +1,5 @@
+self-hosted-runner:
+  # Labels of the shared self-hosted CI runners.
+  labels:
+    - ci-heavy
+    - ci-light

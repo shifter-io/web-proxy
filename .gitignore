@@ -16,6 +16,9 @@ secrets/
 !*.example.yml
 !*.example.cfg
 !*.example.toml
+# CI definitions are source.
+!.github/workflows/*.yml
+!.github/actionlint.yaml
 *.pem
 *.key
 *.p12
