@@ -220,7 +220,7 @@ The synthetic fixture values are deliberately non-secret test data; they are not
 
 Run `sh scripts/configure.sh` to generate missing local files. It never overwrites an existing local configuration. Generated files are created with restrictive permissions. Before adopting updated templates, compare them with your local copies and apply changes deliberately.
 
-`.gitignore` excludes local YAML/CFG/TOML files, environment files, credentials directories, certificates/keys, build products, logs, artifacts, and local-only research/report files. Explicit `*.example.*` templates, dependency manifests, source, tests, and this documentation are tracked. `.dockerignore` uses a build-context allowlist so local configuration and evidence do not enter Docker builds.
+`.gitignore` excludes local YAML/CFG/TOML files, environment files, credentials directories, certificates/keys, build products, logs, artifacts, and local-only research/report files. Explicit `*.example.*` templates, dependency manifests, source, tests, CI definitions under `.github/`, and this documentation are tracked. CI fails when a tracked file matches `.gitignore` or tracked text contains a private key block or an absolute home-directory path. `.dockerignore` uses a build-context allowlist so local configuration and evidence do not enter Docker builds.
 
 The HTTP server never serves the repository root. Both the API's demo and the gateway serve only explicitly allowed browser assets from their respective `web/control`, `web/runtime`, and published `web/sdk` directories. Unknown files, dotfiles, configuration, backups, SDK source directories, source maps, encoded aliases, traversal paths, and symlinked assets return 404 with `Cache-Control: no-store`. Adding a new public asset requires updating `src/public_assets.rs`; SDK releases accept numeric `major.minor.patch` directories and only the release's client, CAPTCHA module, and manifest. Runtime dependencies remain at their pinned versions.
 
@@ -578,6 +578,38 @@ The gateway binds sessions to their assigned region and rejects a region mismatc
 
 ## Testing and validation
 
+### Continuous integration
+
+`.github/workflows/ci.yml` runs the merge gate on the shared self-hosted CI runners; every job uses `runs-on: [self-hosted, ci-heavy]` and never names a specific machine (the pool's machines are identical and carry every label; GitHub-hosted runners are never used). It runs on every ready pull request (drafts are skipped until marked ready), every push to `main`, nightly on `main` and on manual dispatch. Each run checks the pull request's own head commit.
+
+| Job | Checks |
+| --- | --- |
+| `changes` | Selects the jobs a pull request needs from its changed files (`.github/scripts/changed-scope.sh`) |
+| `policy` | Repository policy (`.github/scripts/repo-policy.sh`), `docs/*.html` in sync with the Markdown, actionlint |
+| `rust` | `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked` |
+| `node` | `npm ci --ignore-scripts`, `node --test tests/*.test.mjs`, `node scripts/vendor.mjs` |
+| `npm-audit` | `npm audit --audit-level=high --package-lock-only` |
+
+A pull request that changes only documentation (`docs/`, `.cursor/`, README.md, ENGINEERING.md, AGENTS.md, LICENSE and the documentation scripts) runs only `changes` and `policy`. `node` runs for any other change, `rust` when `src/`, the Cargo files or the Dockerfile change, `npm-audit` when `package.json` or `package-lock.json` changes, and every job runs when `.github/` changes. Pushes, nightly and manual runs run every job. When branch protection is enabled, require all five jobs, including `changes`: if it fails, the jobs that depend on it are reported as skipped, which GitHub treats as passing.
+
+CI uses Rust 1.94.1, the version of the Dockerfile's build stage; the `rust` job fails if the two differ, so change both together. The `node` job requires Node 24, as in the Dockerfile's web stage. The 11 real-Redis store tests stay ignored in CI because they need an isolated `REDIS_TEST_URL`.
+
+CI does not run the Docker stack tests (`integration.mjs`, `limits.mjs`, `load.mjs`, `failover.mjs`, `configuration.mjs`, `allowance-redis.sh` and the other stack scripts), the browser tests, the credential scan or the live smoke tests: they need Docker, a running stack with Chrome, or private credentials. Run them locally as described below.
+
+Local equivalents of the CI commands:
+
+```sh
+bash .github/scripts/repo-policy.sh
+python3 scripts/render-readme.py && git diff --exit-code -- docs/readme.html docs/engineering.html
+cargo fmt --check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked
+npm ci --ignore-scripts
+node --test tests/*.test.mjs
+node scripts/vendor.mjs
+npm audit --audit-level=high --package-lock-only
+```
+
 ### Install host-side test dependencies
 
 ```sh
@@ -757,6 +789,9 @@ Production uses server-verified CAPTCHA and anonymous bearer identity. Clearing 
 ## Project layout
 
 ```text
+.github/
+  workflows/ci.yml            Merge-gate CI on self-hosted runners
+  scripts/                    CI change scope and repository policy checks
 src/
   main.rs                     Role selection, routing, headers, process setup
   config.rs                   Validated settings and server-side credential loading
