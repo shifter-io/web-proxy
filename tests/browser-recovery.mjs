@@ -2,29 +2,19 @@
 // Start with tests/run-sdk-tests.mjs --keep; never uses the person's profile.
 import assert from 'node:assert/strict';
 import {readFile,writeFile} from 'node:fs/promises';
-import {randomBytes,createHash} from 'node:crypto';
-import puppeteer from 'puppeteer-core';
-import {docker} from './docker.mjs';
+import {useKeptStack,seedCaptcha,launchChrome,runtimeOrigin} from './test-stack.mjs';
 
-if (!process.env.COMPOSE_FILE) {
-  const context=JSON.parse(await readFile('artifacts/sdk-test-context.json'));
-  Object.assign(process.env,{COMPOSE_FILE:context.composeFile,COMPOSE_PROJECT_NAME:context.project,COMPOSE_PROFILES:'test',SHIFTER_CREDENTIALS_FILE:new URL('./fixtures/credentials.example.toml',import.meta.url).pathname});
-}
+await useKeptStack();
 const sameSite=process.argv.includes('--same-site-downloads');
-const host=sameSite?'http://localhost:8180':'http://127.0.0.1:8180',api='http://localhost:8180',runtimeOrigin='http://localhost:8181';
+const host=sameSite?'http://localhost:8180':'http://127.0.0.1:8180',api='http://localhost:8180';
 assert.equal((await fetch(api+'/api/countries').then(r=>r.json())).testMode,true);
-const token=randomBytes(32).toString('hex');
-await docker(['compose','exec','-T','redis','redis-cli','-n','1','SET',`test-captcha:${createHash('sha256').update(token).digest('hex')}`,new URL(host).hostname,'EX','180']);
+const token=await seedCaptcha(new URL(host).hostname);
 const loader=await readFile(new URL('../web/sdk/v1/shifter-web-proxy.js',import.meta.url),'utf8');
 const release=loader.match(/const RELEASE = '(\d+\.\d+\.\d+)'/)[1];
-const browser=await puppeteer.launch({channel:'chrome',headless:true,args:['--site-per-process']});
+const browser=await launchChrome([host,runtimeOrigin],['--site-per-process']);
 const results=[],consoleErrors=[];
 let page;
 try {
-  const permissions=await browser.target().createCDPSession();
-  await permissions.send('Browser.grantPermissions',{origin:host,permissions:['localNetworkAccess','localNetwork','loopbackNetwork']});
-  await permissions.send('Browser.grantPermissions',{origin:runtimeOrigin,permissions:['localNetworkAccess','localNetwork','loopbackNetwork']});
-  await permissions.detach();
   page=await browser.newPage();
   if (process.argv.includes('--legacy-api-compat')) {
     await page.evaluateOnNewDocument(() => {

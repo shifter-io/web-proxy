@@ -55,6 +55,7 @@ try {
   if(process.argv.includes('--browser') || process.argv.includes('--downloads')) await command('node',['tests/browser-recovery.mjs',...(process.argv.includes('--downloads')?['--downloads']:[])]);
   if(process.argv.includes('--mobile-compat')) await command('node',['tests/browser-recovery.mjs','--mobile-compat']);
   if(process.argv.includes('--legacy-api-compat')) await command('node',['tests/browser-recovery.mjs','--legacy-api-compat']);
+  if(process.argv.includes('--acceptance')) await command('node',['tests/browser-acceptance.mjs']);
   success=true;
   if(process.argv.includes('--keep')) {
     await writeFile(path.join(root,'artifacts/sdk-test-context.json'),JSON.stringify({project,dir,composeFile:env.COMPOSE_FILE}));

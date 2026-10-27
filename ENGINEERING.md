@@ -499,7 +499,7 @@ Changing country revokes the old connection, generates a fresh SID, preserves th
 
 Stop revokes active access and requests website-state cleanup. Resuming uses the same daily time/byte budget and creates a new assignment after a stopped session.
 
-Reload performs an explicit reconnect, retains country/SID/region/allowance, waits for the old connection lease to clear, and reloads the displayed address. Interrupted form submissions are not automatically replayed. Browser cookie retention across this reconnect still needs final acceptance testing.
+Reload performs an explicit reconnect, retains country/SID/region/allowance, waits for the old connection lease to clear, and reloads the displayed address. Interrupted form submissions are not automatically replayed. The synthetic browser acceptance (`--acceptance`) checks that the website's cookies and SID are retained across Reload.
 
 Different SIDs represent independent assignment requests. They do not guarantee globally unique residential IPs. Even a sticky SID can receive a new IP when its residential peer disconnects or its upstream TTL expires.
 
@@ -703,6 +703,7 @@ cargo test
 node scripts/build-sdk.mjs
 docker build -t shifter-web:sdk-check .
 node tests/run-sdk-tests.mjs --browser --downloads --mobile-compat --legacy-api-compat  # Requires local Chrome; omit browser flags for backend checks only
+node tests/run-sdk-tests.mjs --acceptance  # Requires local Chrome; synthetic browser acceptance, about 4 minutes
 HTTPS_TEST_IMAGE=shifter-web:sdk-check HTTPS_TEST_REDIS_TLS=1 node tests/https-deployment.mjs
 ```
 
@@ -711,6 +712,8 @@ The SDK runner creates a separate disposable local project on loopback ports 818
 `--downloads` also runs real Chrome download checks against harmless local fixtures. An unsandboxed localhost control must save every format before the proxy checks run; the harness allows downloads and records Chrome download events. Checks cover attachments, mislabelled executable/archive URLs, extensionless files, redirects, POST, Range, download attributes, Blob/data URLs, nested srcdoc frames, direct proxied URLs and removal of both iframe sandbox attributes. After starting a retained local stack (`node tests/run-sdk-tests.mjs --keep`), run `node tests/browser-recovery.mjs --same-site-downloads` to require direct top-level navigation with an active worker and transport, including unsupported media MIME denials. Both browser modes test JavaScript Fetch/XHR loaders and attachment rejection. Bodies are inert text regardless of their filename or MIME label, not real executable or media samples. Download files, fixture servers and the disposable browser profile are removed after the run. Results are recorded under ignored `artifacts/`. Run `node tests/browser-download-notice.mjs` to preview the actual 403 notice and its CSP on localhost without a proxy account or Docker stack. It saves desktop/mobile screenshots under `artifacts/` and checks narrow layouts, script blocking, and the absence of external requests.
 
 Recovery tests cover hidden error documents, worker capability validation, website HTTP-error passthrough, POST safety, stale frames, retry limits, Stop/destruction cancellation, gateway-attested SID rotation, concurrent recovery, and unchanged quota/expiry. The TLS fixture also exercises recovery under the production Redis ACL and verifies that storage loss denies recovery. Unit runtime tests use a simulated DOM/service-worker bridge. `node tests/browser-recovery.mjs` also runs local system Chrome in a disposable profile against the stack kept by `tests/run-sdk-tests.mjs --keep`: it crashes the cross-site runtime renderer with CDP, verifies automatic recovery and persisted state, and exercises the worker error document under a cross-origin embed. It never opens the person’s normal browser profile.
+
+`--acceptance` runs `tests/browser-acceptance.mjs`, the automated form of the browser acceptance procedure below: fixture loading, destination JavaScript and the synthetic login, Next/Back/Forward, a one-minute idle wait, redirect and second-origin cookie separation, cookie and SID retention across Reload, a country change, Stop and resume, next-load cleanup after a tab reload, and both allowance exhaustion and hard expiry during active traffic. It drives the real control page (`web/control/`) through the hosted SDK loader cross-site (page on `127.0.0.1:8180`, runtime on `localhost:8181`) in a disposable Chrome profile; CAPTCHA tokens are test-only records in Redis database 1 of the disposable stack, and it refuses a stack that does not report test mode. `ACCEPTANCE_IDLE_SECONDS` (default 65, at least 60) sets the idle wait. Each step prints a `PASS` line; results are recorded in ignored `artifacts/browser-acceptance.json`. After `node tests/run-sdk-tests.mjs --keep` it can also run alone as `node tests/browser-acceptance.mjs`.
 
 Local live US investigation used an explicitly approved 10 GB cumulative ceiling on a separate, quota-bounded stack; this does not change the default 20 MiB smoke-test ceiling. Epoxy response-body failures and a Chrome compositor crash were reproduced separately. Production gateway throttling was not established as their cause. Live acceptance results are recorded below; synthetic tests alone do not establish destination compatibility.
 
@@ -740,7 +743,9 @@ Unit tests cover modal cancellation, concurrent clicks, errors, bearer requests,
 
 Raw local reports, live IPs, and workstation-specific evidence are intentionally not published in this repository. Rerun the included checks to produce evidence for your checkout and device. The summary above is a historical observation, not a promise that future dependency or environment changes will pass.
 
-### Remaining manual browser acceptance
+### Browser acceptance
+
+Steps 1–10 below are automated by `node tests/run-sdk-tests.mjs --acceptance` against the synthetic stack (see Shared SDK validation). Step 9's informational state is the page's ended-session panel; the automated check covers both allowance exhaustion and hard expiry of a session without auto-renew during active traffic, including closure of the gateway transport. Still requiring a person: real devices and browsers other than desktop Chrome, the deployment domains with the real CAPTCHA, and public websites under a separately bounded live test budget.
 
 1. Start the mock stack, open the trusted page, and browse `http://fixture.test/`.
 2. Confirm the JavaScript country message and submit the synthetic username form.
@@ -814,6 +819,8 @@ deploy/
 tests/
   fixtures/                   Synthetic SOCKS5/destination and mock credential example
   client.mjs                  Wisp protocol client and TLS tunnel helper
+  browser-acceptance.mjs      Synthetic control-page acceptance: navigation, cookies, Stop, expiry
+  test-stack.mjs              Shared helpers for the disposable test stack
   integration.mjs             Core authorization, isolation, quota and expiry checks
   limits.mjs                  Ticket and stream-admission checks
   load.mjs                    Increasing-concurrency mock benchmark
@@ -867,7 +874,7 @@ This repository does not grant a blanket license for third-party components. Ups
 
 ## Production work still required
 
-- Complete the pending browser acceptance procedure and investigate any remaining idle/navigation failures.
+- Run the synthetic browser acceptance (`node tests/run-sdk-tests.mjs --acceptance`) for each release and investigate any failure; complete browser acceptance on the deployment domains and physical devices.
 - Validate representative public websites and supported authentication flows; define a compatibility policy.
 - Provision the real v2 CAPTCHA key/secret and register both domains; verify real Google challenge acceptance on both websites. Consider stronger identity and abuse monitoring if anonymous quotas are insufficient.
 - Add broader service-level admission controls, operational resource limits, and sustained load testing.

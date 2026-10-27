@@ -1,19 +1,13 @@
 // Run against an isolated APP_ENV=test stack. Never connects to a real upstream.
 import assert from 'node:assert/strict';
-import {randomBytes,createHash} from 'node:crypto';
-import {docker} from './docker.mjs';
 import {Wisp, sleep} from './client.mjs';
+import {sha256 as hash,redis,seedCaptcha} from './test-stack.mjs';
 const base=process.env.CONTROL_ORIGIN || 'http://localhost:8180';
 const origins=['https://example.com','https://second.example.com'];
 const staging='https://staging.example.com';
-const hash=value=>createHash('sha256').update(value).digest('hex');
-const redis=(...args)=>docker(['compose','exec','-T','redis','redis-cli','-n','1','--raw',...args]).then(s=>s.trim());
 const check=await fetch(base+'/api/countries').then(r=>r.json());
 assert.equal(check.testMode,true);
-async function challenge(origin=origins[0],ttl=180) {
-  const token=randomBytes(32).toString('hex');
-  await redis('SET',`test-captcha:${hash(token)}`,new URL(origin).hostname,'EX',String(ttl));return token;
-}
+const challenge=(origin=origins[0],ttl=180)=>seedCaptcha(new URL(origin).hostname,ttl);
 async function api(path,{origin=origins[0],method='GET',body,credential,expected=200}={}) {
   const response=await fetch(`${base}/api/v1/${path}`,{method,headers:{Origin:origin,...(body?{'Content-Type':'application/json'}:{}),...(credential?{Authorization:`Bearer ${credential}`}:{})},body:body?JSON.stringify(body):undefined});
   const data=await response.json().catch(()=>({}));
