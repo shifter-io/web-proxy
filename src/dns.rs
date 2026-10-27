@@ -133,7 +133,7 @@ mod red_proof {
     }
 
     fn needless_return() -> usize {
-        return badly_formatted();
+        badly_formatted()
     }
 
     #[test]
