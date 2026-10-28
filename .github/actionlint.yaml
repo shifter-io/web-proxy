@@ -1,5 +1,6 @@
 self-hosted-runner:
-  # Labels of the shared self-hosted CI runners.
+  # Labels of the CI-SelfHosted runners.
   labels:
-    - ci-heavy
-    - ci-light
+    - ci-2cpu
+    - ci-4cpu
+    - ci-8cpu
