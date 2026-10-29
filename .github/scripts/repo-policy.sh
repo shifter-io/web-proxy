@@ -30,8 +30,8 @@ if git grep -nIE -e '/(Users|home)/[A-Za-z0-9._-]+/' -- . ':!.github/scripts/rep
 fi
 
 if git grep -nE -e 'runs-on:' -- '.github/workflows/' \
-  | grep -vE ':[[:space:]]*runs-on: \[self-hosted, ci-(heavy|light)\][[:space:]]*$'; then
-  fail "every runs-on must be exactly [self-hosted, ci-heavy] or [self-hosted, ci-light]"
+  | grep -vE ':[[:space:]]*runs-on: \[self-hosted, ci-[248]cpu\][[:space:]]*$'; then
+  fail "every runs-on must be exactly [self-hosted, ci-2cpu], [self-hosted, ci-4cpu] or [self-hosted, ci-8cpu]"
 fi
 
 if git grep -nF -e 'pull_request_target' -- '.github/workflows/'; then
