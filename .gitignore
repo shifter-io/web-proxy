@@ -19,6 +19,8 @@ secrets/
 # CI definitions are source.
 !.github/workflows/*.yml
 !.github/actionlint.yaml
+# orchd's work-area map is source.
+!.github/orchd/areas.toml
 *.pem
 *.key
 *.p12
