@@ -124,3 +124,5 @@ mod tests {
         assert_eq!(resolver.entries.lock().await.len(), CAPACITY);
     }
 }
+
+fn  gate_red_proof( ){ }
