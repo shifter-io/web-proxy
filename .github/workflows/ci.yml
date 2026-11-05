@@ -11,11 +11,15 @@
 #   Dockerfile's build-stage version.
 # - node: npm ci, node --test tests/*.test.mjs and scripts/vendor.mjs on Node 24.
 # - npm-audit: npm audit of package-lock.json at level high.
+# - gate: the only required check. It runs after the others whatever their result and passes only
+#   when changes and policy succeeded and each of rust, node and npm-audit succeeded or was skipped
+#   because changes said its inputs did not change.
 # A documentation-only pull request runs only changes and policy; rust, node and npm-audit run when
 # their inputs change, and everything runs when .github/ changes. Pushes to main, the nightly
 # schedule and manual runs run everything. Draft pull requests run nothing until marked ready.
-# Make changes required together with the other jobs: when it fails, the jobs that need it show as
-# skipped, and GitHub counts a skipped job as passed.
+# A job skipped because changes failed counts as passed for GitHub and orchd, so no job but gate is
+# required. On a draft gate is skipped too; a draft cannot merge, and marking it ready runs everything
+# again.
 # Each runner is a fresh machine for one job, so no job waits for a machine slot. The
 # timeout-minutes keep their former slot margin until the CI-SelfHosted reports show the jobs' times.
 # Caches live on each runner under $CI_CACHE_DIR/web-proxy/: target/rust (Cargo target
@@ -33,9 +37,12 @@ on:
     - cron: '23 2 * * *'
   workflow_dispatch:
 
+# A push to main and a scheduled run each take a group of their own, so no main run is cancelled or
+# replaced by a later merge or a manual run. A pull request keeps one group per ref, and its new head
+# cancels the older run.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name == 'push' && github.sha || github.event_name == 'schedule' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -229,3 +236,39 @@ jobs:
           echo "npm_config_cache=$CI_CACHE_DIR/web-proxy/npm" >> "$GITHUB_ENV"
       - name: npm audit
         run: npm audit --audit-level=high --package-lock-only
+
+  gate:
+    name: gate
+    needs: [changes, policy, rust, node, npm-audit]
+    if: always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    runs-on: [self-hosted, ci-2cpu]
+    timeout-minutes: 10
+    steps:
+      - name: Required jobs
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          POLICY: ${{ needs.policy.result }}
+          RUST: ${{ needs.rust.result }}
+          NODE: ${{ needs.node.result }}
+          AUDIT: ${{ needs.npm-audit.result }}
+          WANT_RUST: ${{ needs.changes.outputs.rust }}
+          WANT_NODE: ${{ needs.changes.outputs.node }}
+          WANT_AUDIT: ${{ needs.changes.outputs.audit }}
+        run: |
+          failed=0
+          check() { # check <job> <result> <wanted: true, false or always>
+            if [ "$2" = success ]; then
+              echo "$1: success"
+            elif [ "$2" = skipped ] && [ "$3" = false ]; then
+              echo "$1: skipped, its inputs did not change"
+            else
+              echo "::error::$1: $2 (wanted: $3)"
+              failed=1
+            fi
+          }
+          check changes "$CHANGES" always
+          check policy "$POLICY" always
+          check rust "$RUST" "$WANT_RUST"
+          check node "$NODE" "$WANT_NODE"
+          check npm-audit "$AUDIT" "$WANT_AUDIT"
+          exit "$failed"
