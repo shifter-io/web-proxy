@@ -1,0 +1,55 @@
+# Work areas of web-proxy for orchd: one open task per area (GLOBAL 3.1). web-proxy keeps no area
+# table, so this map is derived from the tree, its generators and the scopes of
+# .github/scripts/changed-scope.sh, and it is effectively one lane for code. Generators checked: CI's
+# only freshness check, scripts/render-readme.py (README.md and ENGINEERING.md to docs/readme.html and
+# docs/engineering.html, `git diff --exit-code`), stays inside `docs`. Not CI-checked but coupled:
+# sync-countries.mjs writes src/ and the control page's flags, build-sdk.mjs and vendor.mjs write
+# web/, and configure.sh writes deploy/ and a tests/ fixture; so the relay (src/), the browser
+# runtime, control page, assets and SDK (web/), the Node test suite and the deployment files are one
+# area, `app`. The Cargo and npm manifests and lockfiles, CI, editor rules and policy are `shared`.
+# The globs are pairwise disjoint and cover every tracked file. A path that matches no glob counts as
+# area:shared, which conflicts with every area.
+v = 1
+
+[areas]
+# the relay server, the browser runtime, control page, its images and the SDK, the Node and shell
+# test suite with its fixtures, the scripts that build, vendor, sync or configure them, and the
+# packaging and deployment files
+app = [
+    "src/**",
+    "web/**",
+    "tests/**",
+    "scripts/build-sdk.mjs",
+    "scripts/vendor.mjs",
+    "scripts/sync-countries.mjs",
+    "scripts/compat/**",
+    "scripts/configure.sh",
+    "scripts/stack.sh",
+    "Dockerfile",
+    ".dockerignore",
+    "compose.*.yaml",
+    ".env.example",
+    "deploy/**",
+    "examples/**",
+]
+# documentation: readme, engineering notes, licence, the rendered docs/ pages and their renderers
+docs = [
+    "README.md",
+    "ENGINEERING.md",
+    "LICENSE",
+    "docs/**",
+    "scripts/render-readme.py",
+    "scripts/generate-readme-header.py",
+]
+# workspace-wide: Cargo and npm manifests and lockfiles, the ignore list, CI and its scripts, editor
+# rules and policy; a change here merges alone
+shared = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "package.json",
+    "package-lock.json",
+    ".gitignore",
+    ".github/**",
+    ".cursor/**",
+    "AGENTS.md",
+]
