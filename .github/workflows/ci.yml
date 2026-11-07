@@ -162,6 +162,7 @@ jobs:
           fi
           python3 .github/scripts/ci-timing.py --start "$CI_EVIDENCE/step-start" \
             --out "$CI_EVIDENCE/timing.json" --title "Test times ($MODE)" "${junit[@]}"
+      # timing.json, the JUnit files and every part's log.
       - name: Upload ci-timing
         if: always() && steps.timing.outcome != 'skipped'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -171,6 +172,7 @@ jobs:
           path: |
             ${{ runner.temp }}/ev/timing.json
             ${{ runner.temp }}/ev/node-junit.xml
+            ${{ runner.temp }}/ev/parts/*.log
             target/nextest/*/junit.xml
 
   report:
