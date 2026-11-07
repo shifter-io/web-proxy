@@ -613,7 +613,7 @@ Slow tests and the 90-second rule: pull requests leave out Rust tests whose name
 
 Merging: pull requests merge only through the merge queue, as squash commits. The required checks are `tier1`, `maestro-policy`, `maestro/review` and `maestro/qa`, enforced for administrators too.
 
-Server size and times: <!-- measured: filled in by #25 -->
+Server size and times: `ci-8cpu` is the smallest size whose measured runs all keep the parts step under 90 seconds and the job under 4 minutes. Measured with a warm cache (three manual runs per size, November 2026): on `ci-8cpu` the parts step takes 22–24 seconds and the job 33–34 seconds, with sccache at 100% and about $0.002 per run; `ci-16cpu` takes 13–15 seconds and `ci-32cpu` 9–11 seconds for the parts step, at 1.3 to 2.4 times the cost. Getting a fresh server takes about 90–115 seconds before the job starts, whatever the size; the slowest test takes under 3 seconds.
 
 CI does not run the Docker stack tests (`integration.mjs`, `limits.mjs`, `load.mjs`, `failover.mjs`, `configuration.mjs`, `allowance-redis.sh` and the other stack scripts), the browser tests, the credential scan or the live smoke tests: they need Docker, a running stack with Chrome, or private credentials. The 11 real-Redis store tests are skipped because they need an isolated `REDIS_TEST_URL`. Run them locally as described below. The CI server refuses pull requests from forks or from anyone but the repository owner, before any step runs.
 
