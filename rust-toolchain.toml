@@ -1,0 +1,5 @@
+# Same version as the Dockerfile's build stage (FROM rust:<version>-); CI fails when they differ.
+[toolchain]
+channel = "1.94.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

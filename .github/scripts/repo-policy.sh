@@ -46,14 +46,13 @@ while IFS=: read -r file line text; do
       ;;
   esac
   fail "$file:$line: runs-on must be [self-hosted, ci-Ncpu] (N = 2, 4, 8, 16 or 32), [self-hosted, \"\${{ inputs.size || 'ci-Ncpu' }}\"] (N = 8, 16 or 32), or ubuntu-latest in maestro-policy.yml and maestro-queue.yml"
-done < <(git grep -nE -e 'runs-on:' -- '.github/workflows/' || true)
+done < <(git grep -nE -e 'runs-on:' -- '.github/workflows/')
 
 if git grep -nF -e 'pull_request_target' -- '.github/workflows/'; then
   fail "workflows must not use pull_request_target"
 fi
 
-# Only a uses: key counts, not a key that ends in it (statuses: read).
-if git grep -nE -e '^[[:space:]]*(-[[:space:]]+)?uses:' -- '.github/workflows/' \
+if git grep -nE -e 'uses:' -- '.github/workflows/' \
   | grep -vE ':[[:space:]]*(-[[:space:]]+)?uses: (\./[^[:space:]]+|[^[:space:]@]+@[0-9a-f]{40})([[:space:]]+#.*)?[[:space:]]*$'; then
   fail "every action must be a local ./ path or pinned to a full 40-character commit SHA"
 fi

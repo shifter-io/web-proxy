@@ -580,21 +580,42 @@ The gateway binds sessions to their assigned region and rejects a region mismatc
 
 ### Continuous integration
 
-`.github/workflows/ci.yml` runs the merge gate on the shared self-hosted CI runners; every job uses `runs-on: [self-hosted, ci-heavy]` and never names a specific machine (the pool's machines are identical and carry every label; GitHub-hosted runners are never used). It runs on every ready pull request (drafts are skipped until marked ready), every push to `main`, nightly on `main` and on manual dispatch. Each run checks the pull request's own head commit.
+`.github/workflows/ci.yml` is the merge gate. It runs on the shared self-hosted CI pool (CI-SelfHosted servers; GitHub-hosted runners are never used) as one job, `tier1`, on one fresh server per run: `[self-hosted, ci-8cpu]`, or the size a manual run picks. Its step "Checks and tests in parallel" starts every part at the same time through `.github/scripts/ci-run.sh` (parts runner: `.github/scripts/ci-parts.sh`). Each part has its own log; the job summary shows the parts table (result and seconds per part), and the log of every failed part is printed in its own group. A part that is killed fails the run as "no result". Each run checks the pull request's own head commit.
 
-| Job | Checks |
-| --- | --- |
-| `changes` | Selects the jobs a pull request needs from its changed files (`.github/scripts/changed-scope.sh`) |
-| `policy` | Repository policy (`.github/scripts/repo-policy.sh`), `docs/*.html` in sync with the Markdown, actionlint |
-| `rust` | `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked` |
-| `node` | `npm ci --ignore-scripts`, `node --test tests/*.test.mjs`, `node scripts/vendor.mjs` |
-| `npm-audit` | `npm audit --audit-level=high --package-lock-only` |
+| Part | Command | Runs when |
+| --- | --- | --- |
+| `policy` | `bash .github/scripts/repo-policy.sh` | always |
+| `docs` | `python3 scripts/render-readme.py`, then `git diff --exit-code -- docs/readme.html docs/engineering.html`, in its own worktree | always |
+| `actionlint` | actionlint 1.7.12 (pinned, checksum-verified download), all workflows | always |
+| `fmt` | `cargo fmt --check` | Rust inputs changed |
+| `clippy` | `cargo clippy --all-targets --locked --target-dir target/clippy -- -D warnings` | Rust inputs changed |
+| `rust-test` | `cargo nextest run --locked --profile ci` (or `full`) `--target-dir target/test` | Rust inputs changed |
+| `npm-ci` | `npm ci --ignore-scripts --no-audit --no-fund --prefer-offline` | not documentation only |
+| `node-test` | `node --test --test-timeout=90000 tests/*.test.mjs` (plus `tests/slow/*.test.mjs` in full mode), after `npm-ci` | not documentation only |
+| `vendor` | `node scripts/vendor.mjs`, after `node-test` (it rewrites `web/runtime/vendor/`, which the tests read) | not documentation only |
+| `npm-audit` | `npm audit --audit-level=high --package-lock-only` | pull requests that change package files or `.github/`, and manual runs |
 
-A pull request that changes only documentation (`docs/`, `.cursor/`, README.md, ENGINEERING.md, AGENTS.md, LICENSE and the documentation scripts) runs only `changes` and `policy`. `node` runs for any other change, `rust` when `src/`, the Cargo files or the Dockerfile change, `npm-audit` when `package.json` or `package-lock.json` changes, and every job runs when `.github/` changes. Pushes, nightly and manual runs run every job. When branch protection is enabled, require all five jobs, including `changes`: if it fails, the jobs that depend on it are reported as skipped, which GitHub treats as passing.
+Before the parts, the job checks that `rust-toolchain.toml` (Rust 1.94.1 with rustfmt and clippy) names the version of the Dockerfile's `FROM rust:<version>-` build stage, so change both together, and that Node is major 24, as in the Dockerfile's web stage. The CI server image pre-installs the toolchain `rust-toolchain.toml` names. Rust builds share the pool's sccache; build folders are set with `--target-dir`, never with a `CARGO_*` variable, which sccache would put into its cache key.
 
-CI uses Rust 1.94.1, the version of the Dockerfile's build stage; the `rust` job fails if the two differ, so change both together. The `node` job requires Node 24, as in the Dockerfile's web stage. The 11 real-Redis store tests stay ignored in CI because they need an isolated `REDIS_TEST_URL`.
+Triggers and modes:
 
-CI does not run the Docker stack tests (`integration.mjs`, `limits.mjs`, `load.mjs`, `failover.mjs`, `configuration.mjs`, `allowance-redis.sh` and the other stack scripts), the browser tests, the credential scan or the live smoke tests: they need Docker, a running stack with Chrome, or private credentials. Run them locally as described below.
+- **Pull requests** (opened, synchronized, reopened, marked ready) run in fast mode. A draft gets no `tier1` result (its job is named `tier1 (skipped on drafts)`); marking it ready runs `tier1`.
+- **Merge queue** groups (`merge_group`) run in full mode: GitHub tests each pull request together with `main` before it merges.
+- **Every 6 hours** (`0 */6 * * *`) a scheduled run tests `main` in full mode. When it is not green, the `report` job opens one issue, "Scheduled full CI run failed on main" (`.github/scripts/report-red.sh`; it adds nothing when that issue is already open). No other event runs `report`.
+- **Manual runs** (`workflow_dispatch`) run in full mode, with the server size (`ci-8cpu`, `ci-16cpu` or `ci-32cpu`) as input.
+- Pushes to `main` run nothing: `main` only ever receives what the merge queue tested.
+
+A pull request runs only the parts its changed files need (`.github/scripts/changed-scope.sh`). One that changes only documentation (`docs/`, `.cursor/`, README.md, ENGINEERING.md, AGENTS.md, LICENSE and the documentation scripts) still reports `tier1`; it runs `policy`, `docs` and `actionlint`, and the summary names the rule that skipped each other part. The Node parts run for any other change, the Rust parts when `src/`, `.cargo/`, the Cargo files, the toolchain file or the Dockerfile change, and everything runs when `.github/` changes. The merge queue, the 6-hour run and manual runs run every part except as noted for `npm-audit`.
+
+`npm-audit` runs on pull requests that change `package.json`, `package-lock.json` or `.github/`, and on manual runs. The merge queue and the 6-hour run leave it out, so a newly published advisory never stops merges; `maestro-nightly` audits the dependencies every night instead.
+
+Slow tests and the 90-second rule: pull requests leave out Rust tests whose name starts with `slow_` and JavaScript test files under `tests/slow/`; the merge queue, the 6-hour run and manual runs include them. In every mode a test that runs 90 seconds fails the run (nextest `slow-timeout` in `.config/nextest.toml`, `node --test-timeout` and the "CI time" step, `.github/scripts/ci-timing.py`), and a test over 60 seconds gets a warning to mark it slow. Tests are never retried (`retries = 0`); a flaky test gets its own issue. The "CI time" step adds the test counts and the slowest tests to the job summary, and the run keeps them with the JUnit files as the `ci-timing` artifact for 90 days.
+
+Merging: pull requests merge only through the merge queue, as squash commits. The required checks are `tier1`, `maestro-policy`, `maestro/review` and `maestro/qa`, enforced for administrators too.
+
+Server size and times: `ci-8cpu` is the smallest size whose measured runs all keep the parts step under 90 seconds and the job under 4 minutes. Measured with a warm cache (three manual runs per size, November 2026): on `ci-8cpu` the parts step takes 22–24 seconds and the job 33–34 seconds, with sccache at 100% and about $0.002 per run; `ci-16cpu` takes 13–15 seconds and `ci-32cpu` 9–11 seconds for the parts step, at 1.3 to 2.4 times the cost. Getting a fresh server takes about 90–115 seconds before the job starts, whatever the size; the slowest test takes under 3 seconds.
+
+CI does not run the Docker stack tests (`integration.mjs`, `limits.mjs`, `load.mjs`, `failover.mjs`, `configuration.mjs`, `allowance-redis.sh` and the other stack scripts), the browser tests, the credential scan or the live smoke tests: they need Docker, a running stack with Chrome, or private credentials. The 11 real-Redis store tests are skipped because they need an isolated `REDIS_TEST_URL`. Run them locally as described below. The CI server refuses pull requests from forks or from anyone but the repository owner, before any step runs.
 
 Local equivalents of the CI commands:
 
@@ -603,7 +624,7 @@ bash .github/scripts/repo-policy.sh
 python3 scripts/render-readme.py && git diff --exit-code -- docs/readme.html docs/engineering.html
 cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
-cargo test --locked
+cargo nextest run --locked --profile ci   # or: cargo test --locked
 npm ci --ignore-scripts
 node --test tests/*.test.mjs
 node scripts/vendor.mjs
@@ -790,8 +811,8 @@ Production uses server-verified CAPTCHA and anonymous bearer identity. Clearing 
 
 ```text
 .github/
-  workflows/ci.yml            Merge-gate CI on self-hosted runners
-  scripts/                    CI change scope, repository policy, parts runner, test timing, red-run issue, pinned tools
+  workflows/ci.yml            Merge-gate CI: one self-hosted server per run, parts in parallel
+  scripts/                    CI change scope, repository policy, parts runner, test timing, red-run issue
 src/
   main.rs                     Role selection, routing, headers, process setup
   config.rs                   Validated settings and server-side credential loading

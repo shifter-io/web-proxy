@@ -1,47 +1,49 @@
 # Merge gate (Tier 1) on the shared self-hosted CI pool. GitHub-hosted runners are never used.
-# Every job runs on a fresh one-job CI-SelfHosted runner: [self-hosted, ci-4cpu] for rust,
-# [self-hosted, ci-2cpu] for the others.
+# One job, tier1, on one fresh CI-SelfHosted server per run ([self-hosted, ci-8cpu]; a dispatch
+# may pick ci-16cpu or ci-32cpu). Its "Checks and tests in parallel" step runs every part at the
+# same time through .github/scripts/ci-run.sh (parts runner: .github/scripts/ci-parts.sh): policy,
+# docs, actionlint, fmt, clippy, rust-test (cargo nextest), npm-ci, then node-test, then vendor,
+# and npm-audit. The job summary holds the parts table; a failed part's log is printed in a group.
 #
-# Jobs:
-# - changes: picks the jobs a pull request needs from its changed files
-#   (.github/scripts/changed-scope.sh).
-# - policy: repository policy (.github/scripts/repo-policy.sh), docs/*.html in sync with
-#   README.md and ENGINEERING.md (scripts/render-readme.py), and actionlint. Always runs.
-# - rust: cargo fmt, clippy with warnings denied and cargo test on Rust 1.94.1, the
-#   Dockerfile's build-stage version.
-# - node: npm ci, node --test tests/*.test.mjs and scripts/vendor.mjs on Node 24.
-# - npm-audit: npm audit of package-lock.json at level high.
-# - gate: the only required check. It runs after the others whatever their result and passes only
-#   when changes and policy succeeded and each of rust, node and npm-audit succeeded or was skipped
-#   because changes said its inputs did not change.
-# A documentation-only pull request runs only changes and policy; rust, node and npm-audit run when
-# their inputs change, and everything runs when .github/ changes. Pushes to main, the nightly
-# schedule and manual runs run everything. Draft pull requests run nothing until marked ready.
-# A job skipped because changes failed counts as passed for GitHub, so no job but gate is
-# required. On a draft gate is skipped too; a draft cannot merge, and marking it ready runs everything
-# again.
-# Each runner is a fresh machine for one job, so no job waits for a machine slot. The
-# timeout-minutes keep their former slot margin until the CI-SelfHosted reports show the jobs' times.
-# Caches live on each runner under $CI_CACHE_DIR/web-proxy/: target/rust (Cargo target
-# directory), npm (npm cache) and tools/ (the verified actionlint download).
-# Not run here: Docker stack tests, browser tests, the credential scan (tests/secret-scan.py) and
-# live smoke tests. Run them locally as ENGINEERING.md "Testing and validation" describes.
+# Triggers and modes:
+# - pull_request (ready, not draft): fast mode. Rust tests named slow_* and tests/slow/*.test.mjs
+#   are left out. A draft gets no tier1 result ("tier1 (skipped on drafts)"); marking it ready runs it.
+# - merge_group: the merge queue tests each PR together with main, full mode.
+# - schedule, every 6 hours on main: full mode; when it is not green, report opens one issue
+#   (.github/scripts/report-red.sh). No other event runs report.
+# - workflow_dispatch: full mode, with the server size as input.
+# Pushes to main run nothing: main only ever receives what the queue tested.
+# A pull request runs only the parts its changed files need (.github/scripts/changed-scope.sh): a
+# documentation-only one runs policy, docs and actionlint, and the summary names the rule that
+# skipped each other part. npm-audit runs on PRs that change package files or .github/ and on
+# dispatch; the queue and the 6-hour run leave it out, and maestro-nightly audits every night.
+# Time rules: a test that runs 90 s fails the run (nextest slow-timeout, node --test-timeout and the
+# CI time step); a test over 60 s gets a warning to mark it slow.
+# The server's job-started guard refuses forks, pull requests by anyone but the owner and every
+# event not listed above, before any step runs.
+# Not run here: the Docker stack suites, browser tests, live smoke tests, the credential scan
+# (tests/secret-scan.py) and the 11 real-Redis store tests, which need REDIS_TEST_URL. Run them
+# locally as ENGINEERING.md "Testing and validation" describes.
 name: ci
 
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-  push:
-    branches: [main]
+  merge_group:
+    types: [checks_requested]
   schedule:
-    - cron: '23 2 * * *'
+    - cron: "0 */6 * * *" # full run on main, slow tests included
   workflow_dispatch:
+    inputs:
+      size:
+        description: CI server size
+        type: choice
+        options: [ci-8cpu, ci-16cpu, ci-32cpu]
+        default: ci-8cpu
 
-# A push to main and a scheduled run each take a group of their own, so no main run is cancelled or
-# replaced by a later merge or a manual run. A pull request keeps one group per ref, and its new head
-# cancels the older run.
+# A PR keeps one run per branch; queue, scheduled and dispatched runs never cancel each other.
 concurrency:
-  group: ci-${{ github.event_name == 'push' && github.sha || github.event_name == 'schedule' && github.run_id || github.ref }}
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -56,43 +58,14 @@ env:
   HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
-  changes:
-    name: changes
+  tier1:
+    name: ${{ github.event.pull_request.draft && 'tier1 (skipped on drafts)' || 'tier1' }}
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    runs-on: [self-hosted, ci-2cpu]
-    timeout-minutes: 30
-    outputs:
-      rust: ${{ steps.scope.outputs.rust }}
-      node: ${{ steps.scope.outputs.node }}
-      audit: ${{ steps.scope.outputs.audit }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ env.HEAD_SHA }}
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Changed scope
-        id: scope
-        env:
-          EVENT: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          changed="$RUNNER_TEMP/changed-files"
-          if [ "$EVENT" = pull_request ]; then
-            git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" > "$changed"
-          else
-            : > "$changed"
-          fi
-          echo "event=$EVENT head=$HEAD_SHA base=${BASE_SHA:-none} changed files: $(grep -c . "$changed" || true)"
-          bash .github/scripts/changed-scope.sh "$EVENT" < "$changed" | tee -a "$GITHUB_OUTPUT"
-
-  policy:
-    name: policy
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    runs-on: [self-hosted, ci-2cpu]
-    timeout-minutes: 35
+    runs-on: [self-hosted, "${{ inputs.size || 'ci-8cpu' }}"]
+    timeout-minutes: 15
     env:
       ACTIONLINT_VERSION: 1.7.12
       ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
@@ -100,19 +73,47 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.HEAD_SHA }}
+          fetch-depth: 0
           persist-credentials: false
-      - name: Repository policy
-        run: bash .github/scripts/repo-policy.sh
-      - name: Documentation sync
+      - name: Scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          python3 scripts/render-readme.py
-          if ! git diff --exit-code -- docs/readme.html docs/engineering.html; then
-            echo "::error::docs/readme.html or docs/engineering.html is stale; run python3 scripts/render-readme.py and commit the result"
-            exit 1
+          changed="$RUNNER_TEMP/changed-files"
+          if [ "$EVENT" = pull_request ]; then
+            git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" > "$changed"
+            mode=fast profile=ci
+          else
+            : > "$changed"
+            mode=full profile=full
           fi
-      - name: actionlint
+          echo "event=$EVENT head=$HEAD_SHA base=${BASE_SHA:-none} changed files: $(wc -l < "$changed")"
+          {
+            bash .github/scripts/changed-scope.sh "$EVENT" < "$changed" | awk -F= '{print "SCOPE_" toupper($1) "=" $2}'
+            echo "MODE=$mode"
+            echo "NEXTEST_PROFILE=$profile"
+            echo "CI_EVIDENCE=$RUNNER_TEMP/ev"
+          } | tee -a "$GITHUB_ENV"
+      - name: Tools
         run: |
           : "${CI_CACHE_DIR:?the runner must set CI_CACHE_DIR}"
+          channel=$(sed -nE 's/^channel = "([^"]+)"$/\1/p' rust-toolchain.toml)
+          if [ -z "$channel" ] || ! grep -qF "FROM rust:${channel}-" Dockerfile; then
+            echo "::error::rust-toolchain.toml channel '$channel' differs from the Dockerfile's rust image; change both together"
+            exit 1
+          fi
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+          cargo --version
+          cargo nextest --version
+          node --version
+          npm --version
+          major=$(node -p 'process.versions.node.split(".")[0]')
+          if [ "$major" != 24 ]; then
+            echo "::error::Node 24 is required, as in the Dockerfile's web stage"
+            exit 1
+          fi
           if [ "$RUNNER_ARCH" != X64 ]; then
             echo "::error::actionlint is pinned for linux_amd64, not $RUNNER_ARCH"
             exit 1
@@ -134,141 +135,72 @@ jobs:
           fi
           tar -xzf "$tarball" -C "$RUNNER_TEMP" actionlint
           "$RUNNER_TEMP/actionlint" -version
-          "$RUNNER_TEMP/actionlint"
-
-  rust:
-    name: rust
-    needs: changes
-    if: needs.changes.outputs.rust == 'true'
-    runs-on: [self-hosted, ci-4cpu]
-    timeout-minutes: 65
-    env:
-      # Same version as the Dockerfile's build stage; change both together (checked below).
-      RUSTUP_TOOLCHAIN: 1.94.1
-      CARGO_PROFILE_DEV_DEBUG: line-tables-only
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+          echo "ACTIONLINT=$RUNNER_TEMP/actionlint" >> "$GITHUB_ENV"
+      - name: Checks and tests in parallel
+        id: parts
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          mkdir -p "$CI_EVIDENCE"
+          date +%s > "$CI_EVIDENCE/step-start"
+          bash .github/scripts/ci-run.sh
+      - name: CI time
+        id: timing
+        if: always() && steps.parts.outcome != 'skipped' && (env.SCOPE_RUST == 'true' || env.SCOPE_NODE == 'true')
+        run: |
+          # The JUnit files of the test parts that ran; a part that did not run has no .rc file.
+          junit=()
+          if [ -e "$CI_EVIDENCE/parts/rust-test.rc" ]; then
+            junit+=("target/nextest/$NEXTEST_PROFILE/junit.xml")
+          fi
+          if [ -e "$CI_EVIDENCE/parts/node-test.rc" ]; then
+            junit+=("$CI_EVIDENCE/node-junit.xml")
+          fi
+          if [ "${#junit[@]}" -eq 0 ]; then
+            echo "no test part ran"
+            exit 0
+          fi
+          python3 .github/scripts/ci-timing.py --start "$CI_EVIDENCE/step-start" \
+            --out "$CI_EVIDENCE/timing.json" --title "Test times ($MODE)" "${junit[@]}"
+      # timing.json, the JUnit files and every part's log.
+      - name: Upload ci-timing
+        if: always() && steps.timing.outcome != 'skipped'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          ref: ${{ env.HEAD_SHA }}
-          persist-credentials: false
-      - name: Cargo target directory
-        run: |
-          : "${CI_CACHE_DIR:?the runner must set CI_CACHE_DIR}"
-          echo "CARGO_TARGET_DIR=$CI_CACHE_DIR/web-proxy/target/rust" >> "$GITHUB_ENV"
-      - name: Toolchain matches the Dockerfile
-        run: |
-          if ! grep -qF "FROM rust:${RUSTUP_TOOLCHAIN}-" Dockerfile; then
-            echo "::error::RUSTUP_TOOLCHAIN $RUSTUP_TOOLCHAIN differs from the Dockerfile's rust image; change both together"
-            exit 1
-          fi
-      - name: Install toolchain
-        run: |
-          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt --component clippy
-          rustc --version
-          cargo --version
-          echo "CARGO_TARGET_DIR=$CARGO_TARGET_DIR"
-      - name: cargo fmt
-        run: cargo fmt --check
-      - name: cargo clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
-      - name: cargo test
-        run: |
-          log="$RUNNER_TEMP/cargo-test.log"
-          cargo test --locked 2>&1 | tee "$log"
-          results=$(sed 's/\x1b\[[0-9;]*m//g' "$log" | grep '^test result:' || true)
-          printf '%s\n' "$results" >> "$GITHUB_STEP_SUMMARY"
-          if ! grep -Eq '^test result: ok\. [1-9][0-9]* passed' <<< "$results"; then
-            echo "::error::cargo test reported no passing test"
-            exit 1
-          fi
+          name: ci-timing
+          retention-days: 90
+          path: |
+            ${{ runner.temp }}/ev/timing.json
+            ${{ runner.temp }}/ev/node-junit.xml
+            ${{ runner.temp }}/ev/parts/*.log
+            target/nextest/*/junit.xml
 
-  node:
-    name: node
-    needs: changes
-    if: needs.changes.outputs.node == 'true'
-    runs-on: [self-hosted, ci-2cpu]
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ env.HEAD_SHA }}
-          persist-credentials: false
-      - name: npm cache and Node version
-        run: |
-          : "${CI_CACHE_DIR:?the runner must set CI_CACHE_DIR}"
-          echo "npm_config_cache=$CI_CACHE_DIR/web-proxy/npm" >> "$GITHUB_ENV"
-          node --version
-          npm --version
-          major=$(node -p 'process.versions.node.split(".")[0]')
-          if [ "$major" != 24 ]; then
-            echo "::error::Node 24 is required, as in the Dockerfile's web stage"
-            exit 1
-          fi
-      - name: npm ci
-        run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Node tests
-        run: |
-          tap="$RUNNER_TEMP/node-tests.tap"
-          node --test --test-reporter=spec --test-reporter-destination=stdout \
-            --test-reporter=tap --test-reporter-destination="$tap" tests/*.test.mjs
-          grep -E '^# (tests|pass|fail|skipped|todo) ' "$tap" >> "$GITHUB_STEP_SUMMARY" || true
-          if ! grep -Eq '^# pass [1-9][0-9]*$' "$tap"; then
-            echo "::error::node --test reported no passing test"
-            exit 1
-          fi
-      - name: Vendor browser dependencies
-        run: node scripts/vendor.mjs
-
-  npm-audit:
-    name: npm-audit
-    needs: changes
-    if: needs.changes.outputs.audit == 'true'
-    runs-on: [self-hosted, ci-2cpu]
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ env.HEAD_SHA }}
-          persist-credentials: false
-      - name: npm cache
-        run: |
-          : "${CI_CACHE_DIR:?the runner must set CI_CACHE_DIR}"
-          echo "npm_config_cache=$CI_CACHE_DIR/web-proxy/npm" >> "$GITHUB_ENV"
-      - name: npm audit
-        run: npm audit --audit-level=high --package-lock-only
-
-  gate:
-    name: gate
-    needs: [changes, policy, rust, node, npm-audit]
-    if: always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+  report:
+    needs: tier1
+    if: always() && github.event_name == 'schedule' && needs.tier1.result != 'success'
     runs-on: [self-hosted, ci-2cpu]
     timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
     steps:
-      - name: Required jobs
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The CI images have no gh, which report-red.sh needs: a pinned, checksum-verified download.
+      - name: GitHub CLI
         env:
-          CHANGES: ${{ needs.changes.result }}
-          POLICY: ${{ needs.policy.result }}
-          RUST: ${{ needs.rust.result }}
-          NODE: ${{ needs.node.result }}
-          AUDIT: ${{ needs.npm-audit.result }}
-          WANT_RUST: ${{ needs.changes.outputs.rust }}
-          WANT_NODE: ${{ needs.changes.outputs.node }}
-          WANT_AUDIT: ${{ needs.changes.outputs.audit }}
+          GH_VERSION: 2.103.3
+          GH_SHA256: 4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d
         run: |
-          failed=0
-          check() { # check <job> <result> <wanted: true, false or always>
-            if [ "$2" = success ]; then
-              echo "$1: success"
-            elif [ "$2" = skipped ] && [ "$3" = false ]; then
-              echo "$1: skipped, its inputs did not change"
-            else
-              echo "::error::$1: $2 (wanted: $3)"
-              failed=1
-            fi
-          }
-          check changes "$CHANGES" always
-          check policy "$POLICY" always
-          check rust "$RUST" "$WANT_RUST"
-          check node "$NODE" "$WANT_NODE"
-          check npm-audit "$AUDIT" "$WANT_AUDIT"
-          exit "$failed"
+          name="gh_${GH_VERSION}_linux_amd64"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$name.tar.gz" \
+            "https://github.com/cli/cli/releases/download/v${GH_VERSION}/$name.tar.gz"
+          echo "$GH_SHA256  $RUNNER_TEMP/$name.tar.gz" | sha256sum --check --quiet -
+          tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/$name/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/$name/bin/gh" --version
+      - name: Open the red-run issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/scripts/report-red.sh "Scheduled full CI run failed on main"
