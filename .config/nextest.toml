@@ -1,0 +1,23 @@
+# cargo-nextest profiles for CI (.github/scripts/ci-run.sh). nextest runs no doc tests; this crate
+# is a binary and has none.
+# ci: pull requests. Tests named slow_* (a 60 s+ test must be renamed so) are left out.
+# full: the merge queue, the 6-hour run and dispatch; every test.
+# Both: a test is killed and failed at 90 s (3 periods of 30 s), never retried, and every test runs
+# even after a failure.
+
+[profile.ci]
+default-filter = "not test(/^slow_|::slow_/)"
+fail-fast = false
+retries = 0
+slow-timeout = { period = "30s", terminate-after = 3 }
+
+[profile.ci.junit]
+path = "junit.xml"
+
+[profile.full]
+fail-fast = false
+retries = 0
+slow-timeout = { period = "30s", terminate-after = 3 }
+
+[profile.full.junit]
+path = "junit.xml"

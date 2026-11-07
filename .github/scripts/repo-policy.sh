@@ -46,7 +46,7 @@ while IFS=: read -r file line text; do
       ;;
   esac
   fail "$file:$line: runs-on must be [self-hosted, ci-Ncpu] (N = 2, 4, 8, 16 or 32), [self-hosted, \"\${{ inputs.size || 'ci-Ncpu' }}\"] (N = 8, 16 or 32), or ubuntu-latest in maestro-policy.yml and maestro-queue.yml"
-done < <(git grep -nE -e 'runs-on:' -- '.github/workflows/' || true)
+done < <(git grep -nE -e 'runs-on:' -- '.github/workflows/')
 
 if git grep -nF -e 'pull_request_target' -- '.github/workflows/'; then
   fail "workflows must not use pull_request_target"
