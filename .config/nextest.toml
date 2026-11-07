@@ -5,6 +5,10 @@
 # Both: a test is killed and failed at 90 s (3 periods of 30 s), never retried, and every test runs
 # even after a failure.
 
+# JUnit reports: target/nextest/<profile>/junit.xml (relative to the workspace, whatever --target-dir).
+[store]
+dir = "target/nextest"
+
 [profile.ci]
 default-filter = "not test(/^slow_|::slow_/)"
 fail-fast = false

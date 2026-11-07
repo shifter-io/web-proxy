@@ -151,7 +151,7 @@ jobs:
           # The JUnit files of the test parts that ran; a part that did not run has no .rc file.
           junit=()
           if [ -e "$CI_EVIDENCE/parts/rust-test.rc" ]; then
-            junit+=("target/test/nextest/$NEXTEST_PROFILE/junit.xml")
+            junit+=("target/nextest/$NEXTEST_PROFILE/junit.xml")
           fi
           if [ -e "$CI_EVIDENCE/parts/node-test.rc" ]; then
             junit+=("$CI_EVIDENCE/node-junit.xml")
@@ -171,7 +171,7 @@ jobs:
           path: |
             ${{ runner.temp }}/ev/timing.json
             ${{ runner.temp }}/ev/node-junit.xml
-            target/test/nextest/*/junit.xml
+            target/nextest/*/junit.xml
 
   report:
     needs: tier1
