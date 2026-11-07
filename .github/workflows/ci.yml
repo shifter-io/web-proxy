@@ -90,7 +90,7 @@ jobs:
           fi
           echo "event=$EVENT head=$HEAD_SHA base=${BASE_SHA:-none} changed files: $(wc -l < "$changed")"
           {
-            bash .github/scripts/changed-scope.sh "$EVENT" < "$changed" | sed 's/^/SCOPE_/'
+            bash .github/scripts/changed-scope.sh "$EVENT" < "$changed" | awk -F= '{print "SCOPE_" toupper($1) "=" $2}'
             echo "MODE=$mode"
             echo "NEXTEST_PROFILE=$profile"
             echo "CI_EVIDENCE=$RUNNER_TEMP/ev"
