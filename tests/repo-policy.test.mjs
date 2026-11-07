@@ -100,6 +100,11 @@ test('rejects an action pinned to a tag, Maestro workflows included', t => {
   assertFails(policy(t, {[file]: workflow('ubuntu-latest', 'actions/checkout@v7')}), file);
 });
 
+test('a key that ends in uses: is not an action', t => {
+  const content = `permissions:\n  statuses: read\n${workflow('[self-hosted, ci-2cpu]')}`;
+  assertPasses(policy(t, {[ci]: content}));
+});
+
 test('rejects a tracked file that matches .gitignore', t => {
   const result = policy(t, {[ci]: workflow('[self-hosted, ci-2cpu]'), '.gitignore': '*.env\n', 'local.env': 'A=1\n'},
     {force: ['local.env']});
