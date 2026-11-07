@@ -812,7 +812,7 @@ Production uses server-verified CAPTCHA and anonymous bearer identity. Clearing 
 ```text
 .github/
   workflows/ci.yml            Merge-gate CI: one self-hosted server per run, parts in parallel
-  scripts/                    CI change scope, repository policy, parts runner, test timing, red-run issue
+  scripts/                    CI change scope, repository policy, parts runner, test timing, red-run issue, pinned tools
 src/
   main.rs                     Role selection, routing, headers, process setup
   config.rs                   Validated settings and server-side credential loading

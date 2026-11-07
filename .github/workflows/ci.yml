@@ -187,20 +187,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # The CI images have no gh, which report-red.sh needs: a pinned, checksum-verified download.
-      - name: GitHub CLI
-        env:
-          GH_VERSION: 2.103.3
-          GH_SHA256: 4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d
-        run: |
-          name="gh_${GH_VERSION}_linux_amd64"
-          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$name.tar.gz" \
-            "https://github.com/cli/cli/releases/download/v${GH_VERSION}/$name.tar.gz"
-          echo "$GH_SHA256  $RUNNER_TEMP/$name.tar.gz" | sha256sum --check --quiet -
-          tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/$name/bin" >> "$GITHUB_PATH"
-          "$RUNNER_TEMP/$name/bin/gh" --version
       - name: Open the red-run issue
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash .github/scripts/report-red.sh "Scheduled full CI run failed on main"
+          GH_VERSION: 2.103.3
+          GH_SHA256: 4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d
+        run: |
+          # The runner image has jq but no gh, which report-red.sh needs.
+          name="gh_${GH_VERSION}_linux_amd64"
+          path=$(bash .github/scripts/install-tool.sh gh "$GH_VERSION" "$GH_SHA256" \
+            "https://github.com/cli/cli/releases/download/v$GH_VERSION/$name.tar.gz" "$name/bin/gh")
+          PATH="$(dirname "$path"):$PATH"
+          gh --version
+          bash .github/scripts/report-red.sh "Scheduled full CI run failed on main"
