@@ -145,3 +145,12 @@ async fn asset_headers(
     );
     response
 }
+
+#[cfg(test)]
+mod proof_slow_tests {
+    #[test]
+    fn slow_proof() {
+        let n: u32 = "4".parse().unwrap();
+        assert_eq!(n, 4);
+    }
+}
