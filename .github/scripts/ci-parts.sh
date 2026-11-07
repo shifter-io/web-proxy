@@ -14,6 +14,9 @@
 #                              part failed, had no result or was not run; otherwise 0.
 # CMD may be a shell function defined before the call. Status notes (skipped, not run) are kept in
 # NAME.note. Names are letters, digits, dot, underscore and dash.
+# Call part and part_after as plain commands, never after ||, && or if (bash then ignores set -e
+# inside CMD), and CMD must not set an EXIT trap (the part records its status in one). parts_wait
+# waits for every background job of the shell, so start no other background job before it.
 
 CI_PARTS_NAMES=()
 CI_PARTS_PIDS=()

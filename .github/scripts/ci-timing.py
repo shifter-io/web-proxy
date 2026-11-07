@@ -8,6 +8,10 @@ test step's start time in epoch seconds. Writes to $GITHUB_STEP_SUMMARY (stdout 
 file, the tests, passed, failed and skipped counts, the slowest tests and the step's time, and the
 same data as JSON to --out.
 
+A test is its name under the path of its enclosing <testsuite> names (nextest: the test binary; node:
+the parent tests). Node's report names no file, so a top-level test name must be unique across the
+test files of one report; runs of the same test have their times summed.
+
 Rules: a test over 60 s and a step over 90 s print a ::warning::. Exits 1 when a test took 90 s or
 more, the step took over 240 s, or a JUnit file is missing, unreadable, not JUnit or holds no test.
 Exits 2 on a usage error. Standard library only.
@@ -46,6 +50,15 @@ def read_start(path):
         raise TimingError(f"--start {path}: no epoch seconds ({error})") from error
 
 
+def testcases(element, suites=()):
+    """Yield (suite path, <testcase>) for every test under `element`, depth first."""
+    for child in element:
+        if child.tag == "testsuite":
+            yield from testcases(child, suites + (child.get("name", ""),))
+        elif child.tag == "testcase":
+            yield " > ".join(suites), child
+
+
 def read_junit(path):
     """Return {(suite, name): {"seconds", "states"}} for every <testcase> in a JUnit file."""
     try:
@@ -55,8 +68,9 @@ def read_junit(path):
     if root.tag not in ("testsuites", "testsuite"):
         raise TimingError(f"{path}: not JUnit (root element <{root.tag}>)")
     tests = {}
-    for case in root.iter("testcase"):
-        key = (case.get("classname", ""), case.get("name", ""))
+    top = (root.get("name", ""),) if root.tag == "testsuite" else ()
+    for suite, case in testcases(root, top):
+        key = (suite, case.get("name", ""))
         try:
             seconds = float(case.get("time", "0"))
         except ValueError as error:

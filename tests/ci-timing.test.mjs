@@ -56,7 +56,7 @@ test('reads nextest and node JUnit and writes counts per file, slowest tests and
   assert.match(r.table, /^### Test times\n\nTest step: 3\d(\.\d)? s\n/);
   assert.match(r.table, /\| rust\.xml \| 4 \| 2 \| 1 \| 1 \|/);
   assert.match(r.table, /\| node\.xml \| 4 \| 2 \| 1 \| 1 \|/);
-  assert.match(r.table, /Slowest 8 tests:\n\n\| Seconds \| Test \| Suite \| File \|\n\| --- \| --- \| --- \| --- \|\n\| 2\.5 \| tests::slowish \| web-proxy::bin \| rust\.xml \|\n\| 1\.25 \| renders \| test \| node\.xml \|/);
+  assert.match(r.table, /Slowest 8 tests:\n\n\| Seconds \| Test \| Suite \| File \|\n\| --- \| --- \| --- \| --- \|\n\| 2\.5 \| tests::slowish \| web-proxy::bin \| rust\.xml \|\n\| 1\.25 \| renders \|  \| node\.xml \|/);
   assert.equal(r.json.title, 'Test times');
   assert.ok(r.json.step_seconds >= 30 && r.json.step_seconds < 40, String(r.json.step_seconds));
   assert.deepEqual(r.json.files, [
@@ -110,6 +110,22 @@ test('the step warns over 90 s and fails over 240 s', async t => {
     assert.match(errors(r.stdout).join('\n'), /the test step took 24\d(\.\d)? s, over the 240 s limit/);
     assert.ok(r.json.step_seconds > 240);
   });
+});
+
+test('a test is its name under its parent suites, so equal names in different parents stay apart', t => {
+  const r = run(t, {
+    'node.xml': '<testsuites>\n<testsuite name="outer one"><testcase name="fails" time="1.5" classname="test"><failure/></testcase></testsuite>\n' +
+      '<testsuite name="outer two"><testsuite name="inner"><testcase name="fails" time="2.5" classname="test"/></testsuite></testsuite>\n' +
+      '<testcase name="fails" time="0.5" classname="test"/>\n</testsuites>\n',
+    'suite.xml': '<testsuite name="bin"><testcase name="a" time="3" classname="bin"/></testsuite>\n',
+  });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.deepEqual(r.json.files, [
+    {file: 'node.xml', tests: 3, passed: 2, failed: 1, skipped: 0},
+    {file: 'suite.xml', tests: 1, passed: 1, failed: 0, skipped: 0},
+  ]);
+  assert.deepEqual(r.json.slowest.map(test => [test.suite, test.name, test.seconds]),
+    [['bin', 'a', 3], ['outer two > inner', 'fails', 2.5], ['outer one', 'fails', 1.5], ['', 'fails', 0.5]]);
 });
 
 test('a missing, invalid, non-JUnit or empty file fails and is reported', t => {
