@@ -17,7 +17,7 @@
 # A documentation-only pull request runs only changes and policy; rust, node and npm-audit run when
 # their inputs change, and everything runs when .github/ changes. Pushes to main, the nightly
 # schedule and manual runs run everything. Draft pull requests run nothing until marked ready.
-# A job skipped because changes failed counts as passed for GitHub and orchd, so no job but gate is
+# A job skipped because changes failed counts as passed for GitHub, so no job but gate is
 # required. On a draft gate is skipped too; a draft cannot merge, and marking it ready runs everything
 # again.
 # Each runner is a fresh machine for one job, so no job waits for a machine slot. The
