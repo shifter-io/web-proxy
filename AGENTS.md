@@ -8,3 +8,5 @@
   local configuration and secrets; never commit credentials or private evidence.
 - Keep README.md and the standalone docs/readme.html synchronized using
   `python3 scripts/render-readme.py` when documentation changes.
+
+<!-- proof: a documentation-only change -->
