@@ -5,10 +5,11 @@
 # Jobs:
 # - audit: cargo audit of Cargo.lock with a pinned, checksum-verified cargo-audit release, then
 #   npm audit of package-lock.json at level high. npm audit runs even when cargo audit failed; the
-#   job fails if either did. The cargo-audit download is cached on the runner under
-#   $CI_CACHE_DIR/web-proxy/tools/cargo-audit-<version>.
+#   job fails if either did.
 # - report: on a scheduled run whose audit did not pass, opens one issue (.github/scripts/report-red.sh)
-#   unless one with the same title is already open.
+#   unless one with the same title is already open. It brings a pinned gh, which the runner lacks.
+# Pinned tools are verified and cached on the runner by .github/scripts/install-tool.sh under
+# $CI_CACHE_DIR/web-proxy/tools/<name>-<version>.
 name: maestro-nightly
 on:
   schedule:
@@ -23,6 +24,9 @@ env:
   CARGO_AUDIT_VERSION: 0.22.2
   # SHA-256 of cargo-audit-x86_64-unknown-linux-musl-v0.22.2.tgz from the rustsec/rustsec release.
   CARGO_AUDIT_SHA256: 7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428
+  GH_VERSION: 2.103.3
+  # SHA-256 of gh_2.103.3_linux_amd64.tar.gz from the cli/cli release.
+  GH_SHA256: 4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d
 jobs:
   audit:
     runs-on: [self-hosted, ci-8cpu]
@@ -33,30 +37,12 @@ jobs:
           persist-credentials: false
       - name: Install cargo-audit
         run: |
-          : "${CI_CACHE_DIR:?the runner must set CI_CACHE_DIR}"
-          if [ "$RUNNER_ARCH" != X64 ]; then
-            echo "::error::cargo-audit is pinned for x86_64 Linux, not $RUNNER_ARCH"
-            exit 1
-          fi
-          tools="$CI_CACHE_DIR/web-proxy/tools"
-          dest="$tools/cargo-audit-$CARGO_AUDIT_VERSION"
-          if ! [ -e "$dest/.complete" ]; then
-            rm -rf "$dest"
-            name="cargo-audit-x86_64-unknown-linux-musl-v$CARGO_AUDIT_VERSION"
-            mkdir -p "$tools"
-            tmp=$(mktemp -d "$tools/.tmp.XXXXXX")
-            trap 'rm -rf "$tmp"' EXIT
-            curl -fsSL --retry 3 -o "$tmp/$name.tgz" \
-              "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v$CARGO_AUDIT_VERSION/$name.tgz"
-            echo "$CARGO_AUDIT_SHA256  $tmp/$name.tgz" | sha256sum --check --quiet -
-            mkdir "$tmp/x"
-            tar -xzf "$tmp/$name.tgz" -C "$tmp/x" --strip-components=1 "$name/cargo-audit"
-            touch "$tmp/x/.complete"
-            # Rename into place, so the cache never holds a partial folder; a parallel run may win.
-            mv -T "$tmp/x" "$dest" 2>/dev/null || [ -e "$dest/.complete" ]
-          fi
-          echo "CARGO_AUDIT=$dest/cargo-audit" >> "$GITHUB_ENV"
-          "$dest/cargo-audit" --version
+          name="cargo-audit-x86_64-unknown-linux-musl-v$CARGO_AUDIT_VERSION"
+          path=$(bash .github/scripts/install-tool.sh cargo-audit "$CARGO_AUDIT_VERSION" "$CARGO_AUDIT_SHA256" \
+            "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v$CARGO_AUDIT_VERSION/$name.tgz" \
+            "$name/cargo-audit")
+          echo "CARGO_AUDIT=$path" >> "$GITHUB_ENV"
+          "$path" --version
       - name: cargo audit
         run: |
           "$CARGO_AUDIT" audit
@@ -82,4 +68,11 @@ jobs:
       - name: Open an issue
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash .github/scripts/report-red.sh "Nightly dependency audit failed on main"
+        run: |
+          # The runner image has jq but no gh, which report-red.sh needs.
+          name="gh_${GH_VERSION}_linux_amd64"
+          path=$(bash .github/scripts/install-tool.sh gh "$GH_VERSION" "$GH_SHA256" \
+            "https://github.com/cli/cli/releases/download/v$GH_VERSION/$name.tar.gz" "$name/bin/gh")
+          PATH="$(dirname "$path"):$PATH"
+          gh --version
+          bash .github/scripts/report-red.sh "Nightly dependency audit failed on main"
