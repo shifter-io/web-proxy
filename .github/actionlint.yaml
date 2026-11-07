@@ -4,3 +4,5 @@ self-hosted-runner:
     - ci-2cpu
     - ci-4cpu
     - ci-8cpu
+    - ci-16cpu
+    - ci-32cpu
