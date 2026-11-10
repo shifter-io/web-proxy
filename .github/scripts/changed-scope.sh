@@ -4,8 +4,8 @@
 # Rules:
 # - Any event other than pull_request runs everything.
 # - A pull_request with no changed file runs everything (fail safe).
-# - node runs unless every changed file is documentation (docs/, .cursor/, README, ENGINEERING,
-#   AGENTS, LICENSE and the documentation renderers).
+# - node runs unless every changed file is documentation (docs/, .cursor/, examples/, README,
+#   ENGINEERING, AGENTS, LICENSE and the documentation renderers).
 # - rust runs for src/, .cargo/, .github/, Cargo manifests, Rust toolchain files and the Dockerfile.
 # - audit runs for .github/ and the npm manifests.
 set -euo pipefail
@@ -16,7 +16,7 @@ if [ "$#" -lt 1 ]; then
 fi
 event=$1
 
-docs_re='^(docs/|\.cursor/)|^(README\.md|ENGINEERING\.md|AGENTS\.md|LICENSE|scripts/render-readme\.py|scripts/generate-readme-header\.py)$'
+docs_re='^(docs/|\.cursor/|examples/)|^(README\.md|ENGINEERING\.md|AGENTS\.md|LICENSE|scripts/render-readme\.py|scripts/generate-readme-header\.py)$'
 rust_re='^(src/|\.cargo/|\.github/)|^(Cargo\.toml|Cargo\.lock|rust-toolchain|rust-toolchain\.toml|Dockerfile)$'
 audit_re='^\.github/|^(package\.json|package-lock\.json)$'
 
