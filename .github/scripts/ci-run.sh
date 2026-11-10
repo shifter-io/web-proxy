@@ -60,7 +60,10 @@ part actionlint "$ACTIONLINT"
 if [ "$SCOPE_RUST" = true ]; then
   part fmt cargo fmt --check
   part clippy cargo clippy --all-targets --locked --target-dir target/clippy -- -D warnings
-  part rust-test cargo nextest run --locked --profile "$NEXTEST_PROFILE" --target-dir target/test
+  # The store tests need REDIS_TEST_URL: allowance-redis.sh starts a private Redis (no network,
+  # Unix socket only), runs nextest with it and removes the container, also when tests fail.
+  part rust-test sh tests/allowance-redis.sh cargo nextest run --locked --profile "$NEXTEST_PROFILE" \
+    --target-dir target/test --run-ignored all
 else
   rule=$rust_rule
   if [ "$SCOPE_NODE" != true ]; then rule=$docs_rule; fi

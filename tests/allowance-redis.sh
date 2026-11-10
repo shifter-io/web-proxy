@@ -8,8 +8,12 @@ cleanup() {
   rm -rf "$fixture_dir"
 }
 trap cleanup EXIT HUP INT TERM
-chmod 777 "$fixture_dir"
-container=$(docker run -d --rm --network none -v "$fixture_dir:/data" \
+# The image hands /data to its redis user, under rootless Docker another host user. Mounting a
+# subfolder keeps $fixture_dir ours, so cleanup can still remove it from a sticky /tmp.
+socket_dir="$fixture_dir/redis"
+mkdir "$socket_dir"
+chmod 777 "$socket_dir"
+container=$(docker run -d --rm --network none -v "$socket_dir:/data" \
   redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499 \
   redis-server --port 0 --save '' --appendonly no --protected-mode yes \
   --unixsocket /data/redis.sock --unixsocketperm 777)
@@ -22,4 +26,4 @@ done
 if [ "$#" -eq 0 ]; then
   set -- cargo test --locked store::tests -- --include-ignored
 fi
-REDIS_TEST_URL="redis+unix://$fixture_dir/redis.sock" "$@"
+REDIS_TEST_URL="redis+unix://$socket_dir/redis.sock" "$@"
