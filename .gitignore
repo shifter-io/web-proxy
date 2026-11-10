@@ -12,6 +12,8 @@ secrets/
 *.cfg
 *.toml
 !Cargo.toml
+!rust-toolchain.toml
+!.config/nextest.toml
 !*.example.yaml
 !*.example.yml
 !*.example.cfg
