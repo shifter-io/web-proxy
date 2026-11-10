@@ -7,17 +7,26 @@ import {dirname, join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const repo = fileURLToPath(new URL('..', import.meta.url));
-const scripts = ['.github/scripts/ci-run.sh', '.github/scripts/ci-parts.sh'];
+const scripts = ['.github/scripts/ci-run.sh', '.github/scripts/ci-parts.sh', 'tests/allowance-redis.sh',
+  'tests/redis-image.sh'];
 
 // Every tool ci-run.sh calls is this stub: it logs its command line and fails (exit 7) when the line
-// starts with $STUB_FAIL.
+// starts with $STUB_FAIL. A line run with REDIS_TEST_URL set is also logged to $STUB_LOG.redis, and
+// `docker run` prints a container name.
 const stub = `#!/bin/sh
 line="$(basename "$0") $*"
 echo "$line" >> "$STUB_LOG"
 if [ -n "$STUB_FAIL" ]; then
   case "$line" in "$STUB_FAIL"*) echo "stub failed: $line"; exit 7 ;; esac
 fi
+if [ -n "$REDIS_TEST_URL" ]; then echo "$line" >> "$STUB_LOG.redis"; fi
+if [ "$1" = run ]; then echo redis-fixture; fi
 `;
+
+// The ciod hook: the stub, then the line the real hook prints ($PREFETCH_STATE: prefetched by default).
+const prefetch = `${stub}echo "redis image: \${PREFETCH_STATE:-prefetched} $CI_CACHE_DIR/web-proxy/tools/redis.tar"
+`;
+const archive = 'web-proxy/tools/redis-858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499.tar';
 
 // A renderer that leaves the docs alone, or makes them stale when $STALE is set.
 const renderer = `import os, pathlib
@@ -28,6 +37,7 @@ if os.environ.get("STALE"):
 const docsRule = 'skipped: only documentation changed (.github/scripts/changed-scope.sh)';
 const rustRule = 'skipped: no Rust input changed (.github/scripts/changed-scope.sh)';
 const packageRule = 'skipped: package files did not change (.github/scripts/changed-scope.sh)';
+const nextest = profile => `cargo nextest run --locked --profile ${profile} --target-dir target/test --run-ignored all`;
 
 // Runs ci-run.sh in a temporary committed repository whose tools are stubs.
 function run(t, vars) {
@@ -37,6 +47,7 @@ function run(t, vars) {
   const bin = join(dir, 'bin');
   const files = {
     '.github/scripts/repo-policy.sh': 'echo "$0" >> "$STUB_LOG"\n',
+    '.github/ciod/prefetch.sh': prefetch,
     'scripts/render-readme.py': renderer,
     'docs/readme.html': 'readme\n',
     'docs/engineering.html': 'engineering\n',
@@ -52,18 +63,20 @@ function run(t, vars) {
     writeFileSync(join(work, path), content);
   }
   mkdirSync(bin);
-  for (const tool of ['cargo', 'npm', 'node', 'actionlint']) {
+  for (const tool of ['cargo', 'npm', 'node', 'actionlint', 'docker']) {
     writeFileSync(join(bin, tool), stub);
     chmodSync(join(bin, tool), 0o755);
   }
   const env = {
     ...process.env, GIT_CEILING_DIRECTORIES: dir, PATH: `${bin}:${process.env.PATH}`,
     STUB_LOG: join(dir, 'calls.log'), STUB_FAIL: '', ACTIONLINT: join(bin, 'actionlint'),
-    CI_EVIDENCE: join(dir, 'ev'), RUNNER_TEMP: join(dir, 'tmp'), GITHUB_STEP_SUMMARY: join(dir, 'summary.md'),
+    CI_EVIDENCE: join(dir, 'ev'), CI_CACHE_DIR: join(dir, 'cache'), RUNNER_TEMP: join(dir, 'tmp'),
+    GITHUB_STEP_SUMMARY: join(dir, 'summary.md'),
     SCOPE_RUST: 'true', SCOPE_NODE: 'true', SCOPE_AUDIT: 'true', MODE: 'full', NEXTEST_PROFILE: 'full',
     EVENT: 'merge_group', ...vars,
   };
   delete env.STALE;
+  delete env.REDIS_TEST_URL;
   if (vars.STALE) env.STALE = vars.STALE;
   const git = args => assert.equal(spawnSync('git', ['-c', 'user.name=ci', '-c', 'user.email=ci@example.invalid', ...args],
     {cwd: work, env}).status, 0, `git ${args.join(' ')}`);
@@ -72,11 +85,13 @@ function run(t, vars) {
   git(['commit', '-qm', 'fixture']);
   mkdirSync(env.RUNNER_TEMP);
   const result = spawnSync('bash', [join(work, scripts[0])], {cwd: work, env, encoding: 'utf8', timeout: 60_000});
-  const calls = existsSync(env.STUB_LOG) ? readFileSync(env.STUB_LOG, 'utf8').trim().split('\n').sort() : [];
+  const lines = path => existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n') : [];
+  const calls = lines(env.STUB_LOG).sort();
+  const withRedis = lines(`${env.STUB_LOG}.redis`);
   const summary = existsSync(env.GITHUB_STEP_SUMMARY) ? readFileSync(env.GITHUB_STEP_SUMMARY, 'utf8') : '';
   const parts = Object.fromEntries(summary.split('\n').filter(line => /^\| [a-z]/.test(line) && !line.startsWith('| Part'))
     .map(line => line.split(' | ').slice(0, 2).map(cell => cell.replace(/^\| /, ''))));
-  return {...result, calls, parts};
+  return {...result, calls, withRedis, parts, summary, cache: env.CI_CACHE_DIR};
 }
 
 test('the merge queue runs every part in full mode except npm-audit', t => {
@@ -86,7 +101,7 @@ test('the merge queue runs every part in full mode except npm-audit', t => {
     'node-test', 'vendor', 'npm-audit']);
   for (const name of Object.keys(r.parts).slice(0, -1)) assert.equal(r.parts[name], 'passed', name);
   assert.match(r.parts['npm-audit'], /^skipped: dependency audits run on PRs that change package files, on dispatch/);
-  assert.ok(r.calls.includes('cargo nextest run --locked --profile full --target-dir target/test'), r.calls.join('\n'));
+  assert.ok(r.calls.includes(nextest('full')), r.calls.join('\n'));
   assert.ok(r.calls.includes('cargo clippy --all-targets --locked --target-dir target/clippy -- -D warnings'));
   assert.ok(r.calls.includes('npm ci --ignore-scripts --no-audit --no-fund --prefer-offline'));
   assert.ok(r.calls.includes('node scripts/vendor.mjs'));
@@ -100,7 +115,7 @@ test('a pull request in fast mode leaves out the slow test files', t => {
   const r = run(t, {EVENT: 'pull_request', MODE: 'fast', NEXTEST_PROFILE: 'ci'});
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.match(r.calls.find(call => call.startsWith('node --test')), / tests\/a\.test\.mjs$/);
-  assert.ok(r.calls.includes('cargo nextest run --locked --profile ci --target-dir target/test'));
+  assert.ok(r.calls.includes(nextest('ci')));
   assert.ok(r.calls.includes('npm audit --audit-level=high --package-lock-only'));
   assert.equal(r.parts['npm-audit'], 'passed');
 });
@@ -138,6 +153,55 @@ test('a failed npm ci fails the run and the parts after it do not run', t => {
   assert.equal(r.parts.vendor, 'not run: node-test failed');
   assert.equal(r.parts['rust-test'], 'passed');
   assert.match(r.stdout, /::group::npm-ci failed\nstub failed: npm ci/);
+});
+
+test('rust-test runs every test, ignored ones included, against the prefetched Redis it removes', t => {
+  const r = run(t, {});
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.ok(r.calls.some(call => call.trim() === 'prefetch.sh'), r.calls.join('\n'));
+  assert.ok(r.calls.includes(`docker load -i ${join(r.cache, archive)}`), r.calls.join('\n'));
+  const start = r.calls.find(call => call.startsWith('docker run '));
+  assert.match(start, /^docker run -d --rm --pull never --network none -v \S+\/redis:\/data web-proxy-ci\/redis:7\.4-alpine redis-server /);
+  assert.doesNotMatch(start, / -p | --publish /);
+  assert.deepEqual(r.withRedis, [nextest('full')]);
+  assert.ok(r.calls.includes('docker rm -f redis-fixture'), r.calls.join('\n'));
+  assert.match(r.summary, /^redis image: prefetched \S+$/m);
+  assert.doesNotMatch(r.stdout, /::warning::/);
+});
+
+test('a Redis image downloaded on this run is a warning and is named in the summary', t => {
+  const r = run(t, {PREFETCH_STATE: 'installed now'});
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.summary, /^redis image: installed now \S+$/m);
+  assert.match(r.stdout, /^::warning::redis image: installed now \S+: this server image was built without/m);
+});
+
+test('a failed Redis image download fails rust-test before Docker or any test runs', t => {
+  const r = run(t, {STUB_FAIL: 'prefetch.sh'});
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.equal(r.parts['rust-test'], 'failed (exit 7)');
+  assert.ok(!r.calls.some(call => /^(docker|cargo nextest) /.test(call)), r.calls.join('\n'));
+});
+
+test('a failed docker load fails rust-test before any test runs', t => {
+  const r = run(t, {STUB_FAIL: 'docker load'});
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.equal(r.parts['rust-test'], 'failed (exit 7)');
+  assert.ok(!r.calls.some(call => /^(docker run|cargo nextest) /.test(call)), r.calls.join('\n'));
+});
+
+test('a failing store test fails rust-test and the Redis container is still removed', t => {
+  const r = run(t, {STUB_FAIL: 'cargo nextest'});
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.equal(r.parts['rust-test'], 'failed (exit 7)');
+  assert.ok(r.calls.includes('docker rm -f redis-fixture'), r.calls.join('\n'));
+});
+
+test('a Redis that does not start fails rust-test before any test runs', t => {
+  const r = run(t, {STUB_FAIL: 'docker run'});
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.equal(r.parts['rust-test'], 'failed (exit 7)');
+  assert.ok(!r.calls.some(call => call.startsWith('cargo nextest')), r.calls.join('\n'));
 });
 
 test('stale documentation fails the docs part', t => {

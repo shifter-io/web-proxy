@@ -589,7 +589,7 @@ The gateway binds sessions to their assigned region and rejects a region mismatc
 | `actionlint` | actionlint 1.7.12 (pinned, checksum-verified download), all workflows | always |
 | `fmt` | `cargo fmt --check` | Rust inputs changed |
 | `clippy` | `cargo clippy --all-targets --locked --target-dir target/clippy -- -D warnings` | Rust inputs changed |
-| `rust-test` | `cargo nextest run --locked --profile ci` (or `full`) `--target-dir target/test` | Rust inputs changed |
+| `rust-test` | the Redis image (`.github/ciod/prefetch.sh`, then `docker load`), then `sh tests/allowance-redis.sh cargo nextest run --locked --profile ci` (or `full`) `--target-dir target/test --run-ignored all` | Rust inputs changed |
 | `npm-ci` | `npm ci --ignore-scripts --no-audit --no-fund --prefer-offline` | not documentation only |
 | `node-test` | `node --test --test-timeout=90000 tests/*.test.mjs` (plus `tests/slow/*.test.mjs` in full mode), after `npm-ci` | not documentation only |
 | `vendor` | `node scripts/vendor.mjs`, after `node-test` (it rewrites `web/runtime/vendor/`, which the tests read) | not documentation only |
@@ -615,7 +615,9 @@ Merging: pull requests merge only through the merge queue, as squash commits. Th
 
 Server size and times: `ci-8cpu` is the smallest size whose measured runs all keep the parts step under 90 seconds and the job under 4 minutes. Measured with a warm cache (three manual runs per size, November 2026): on `ci-8cpu` the parts step takes 22–24 seconds and the job 33–34 seconds, with sccache at 100% and about $0.002 per run; `ci-16cpu` takes 13–15 seconds and `ci-32cpu` 9–11 seconds for the parts step, at 1.3 to 2.4 times the cost. Getting a fresh server takes about 90–115 seconds before the job starts, whatever the size; the slowest test takes under 3 seconds.
 
-CI does not run the Docker stack tests (`integration.mjs`, `limits.mjs`, `load.mjs`, `failover.mjs`, `configuration.mjs`, `allowance-redis.sh` and the other stack scripts), the browser tests, the credential scan or the live smoke tests: they need Docker, a running stack with Chrome, or private credentials. The 11 real-Redis store tests are skipped because they need an isolated `REDIS_TEST_URL`. Run them locally as described below. The CI server refuses pull requests from forks or from anyone but the repository owner, before any step runs.
+CI runs the 11 real-Redis store tests (`src/store_tests.rs`) in `rust-test`: `tests/allowance-redis.sh` starts Redis on the server's rootless Docker with `--pull never`, `--network none`, a Unix socket in a temporary folder and no published port, runs nextest with `REDIS_TEST_URL` set and removes the container afterwards, also when tests fail. The image is the `redis:7.4-alpine` index digest pinned in `tests/redis-image.sh`, and a test run never reaches a registry for it. The nightly CI server image build runs the repository's hook `.github/ciod/prefetch.sh`, which downloads the linux/amd64 image through the registry API (Docker Hub, or `public.ecr.aws` with the same digests when Docker Hub fails; one attempt each), checks every part against its sha256 digest and stores it as an OCI archive in the runner's cache. `rust-test` runs the same hook first: on a prefetched image it does nothing, and on a server image built without the hook it downloads the image once, with a warning. It then loads the archive with `docker load`. The job summary says `redis image: prefetched` or `redis image: installed now`. A failed download, a digest mismatch, a failed load or a Redis that does not start fails the part; nothing is retried. Mark a Rust test `#[ignore]` only when it needs `REDIS_TEST_URL`; CI runs every ignored test (`--run-ignored all`), so `#[ignore]` never hides a test from CI.
+
+CI does not run the Docker stack tests (`integration.mjs`, `limits.mjs`, `load.mjs`, `failover.mjs`, `configuration.mjs` and the other stack scripts), the browser tests, the credential scan or the live smoke tests: they need a running stack with Chrome, or private credentials. Run them locally as described below. The CI server refuses pull requests from forks or from anyone but the repository owner, before any step runs.
 
 Local equivalents of the CI commands:
 
@@ -624,7 +626,7 @@ bash .github/scripts/repo-policy.sh
 python3 scripts/render-readme.py && git diff --exit-code -- docs/readme.html docs/engineering.html
 cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
-cargo nextest run --locked --profile ci   # or: cargo test --locked
+sh tests/allowance-redis.sh cargo nextest run --locked --profile ci --run-ignored all   # Linux Docker
 npm ci --ignore-scripts
 node --test tests/*.test.mjs
 node scripts/vendor.mjs

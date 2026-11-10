@@ -9,6 +9,7 @@
 #   EVENT                                the GitHub event name
 #   ACTIONLINT                           the verified actionlint binary
 #   CI_EVIDENCE, RUNNER_TEMP             evidence and scratch directories
+#   CI_CACHE_DIR                         the runner's cache (rust-test: the prefetched Redis image)
 # A part that does not run is recorded as skipped with the rule that skipped it.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -42,6 +43,20 @@ docs() {
   fi
 }
 
+# The store tests' Redis never comes from a registry here: the server image prefetched it
+# (.github/ciod/prefetch.sh; on an image built without the hook, the hook downloads it now, once),
+# docker loads the archive and tests/allowance-redis.sh runs it with --pull never and no network.
+rust_test() {
+  local state
+  # shellcheck source=tests/redis-image.sh
+  . tests/redis-image.sh
+  state=$(bash .github/ciod/prefetch.sh)
+  echo "$state" | tee "$CI_EVIDENCE/redis-image.txt"
+  docker load -i "$CI_CACHE_DIR/web-proxy/tools/$REDIS_ARCHIVE_NAME"
+  REDIS_IMAGE=$REDIS_LOCAL_IMAGE REDIS_PULL=never sh tests/allowance-redis.sh \
+    cargo nextest run --locked --profile "$NEXTEST_PROFILE" --target-dir target/test --run-ignored all
+}
+
 node_test() {
   local files=(tests/*.test.mjs)
   if [ "$MODE" = full ]; then
@@ -60,7 +75,7 @@ part actionlint "$ACTIONLINT"
 if [ "$SCOPE_RUST" = true ]; then
   part fmt cargo fmt --check
   part clippy cargo clippy --all-targets --locked --target-dir target/clippy -- -D warnings
-  part rust-test cargo nextest run --locked --profile "$NEXTEST_PROFILE" --target-dir target/test
+  part rust-test rust_test
 else
   rule=$rust_rule
   if [ "$SCOPE_NODE" != true ]; then rule=$docs_rule; fi
@@ -90,4 +105,14 @@ else
   part_skip npm-audit "$package_rule"
 fi
 
-parts_wait
+status=0
+parts_wait || status=$?
+# rust-test's Redis image line goes to the job summary; a download on this run is a warning.
+if [ -s "$CI_EVIDENCE/redis-image.txt" ]; then
+  state=$(cat "$CI_EVIDENCE/redis-image.txt")
+  printf '\n%s\n' "$state" >> "${GITHUB_STEP_SUMMARY:-/dev/stdout}"
+  if [[ $state == "redis image: installed now"* ]]; then
+    echo "::warning::$state: this server image was built without .github/ciod/prefetch.sh"
+  fi
+fi
+exit "$status"
