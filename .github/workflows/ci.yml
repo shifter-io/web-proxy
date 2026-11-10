@@ -5,6 +5,10 @@
 # docs, actionlint, fmt, clippy, rust-test (cargo nextest, with the real-Redis store tests on a
 # private Redis from tests/allowance-redis.sh), npm-ci, then node-test, then vendor,
 # and npm-audit. The job summary holds the parts table; a failed part's log is printed in a group.
+# rust-test's Redis image is never pulled from a registry: the server image prefetched it into
+# CI_CACHE_DIR (.github/ciod/prefetch.sh, verified by digest), docker loads it and Redis runs with
+# --pull never. On a server image built without the hook, the hook downloads it once with a warning;
+# the summary says "redis image: prefetched" or "redis image: installed now".
 #
 # Triggers and modes:
 # - pull_request (ready, not draft): fast mode. Rust tests named slow_* and tests/slow/*.test.mjs

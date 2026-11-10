@@ -1,6 +1,11 @@
 #!/bin/sh
 # Real Redis store tests without a TCP listener, published ports or live traffic.
+# REDIS_IMAGE (default: the pin in tests/redis-image.sh) and REDIS_PULL (docker run --pull, default
+# missing) let CI run the image it loaded from the server's cache with --pull never.
 set -eu
+. "$(dirname "$0")/redis-image.sh"
+image=${REDIS_IMAGE:-redis:$REDIS_TAG@$REDIS_INDEX_DIGEST}
+pull=${REDIS_PULL:-missing}
 fixture_dir=$(mktemp -d "${TMPDIR:-/tmp}/allowance-redis.XXXXXX")
 container=""
 cleanup() {
@@ -13,8 +18,8 @@ trap cleanup EXIT HUP INT TERM
 socket_dir="$fixture_dir/redis"
 mkdir "$socket_dir"
 chmod 777 "$socket_dir"
-container=$(docker run -d --rm --network none -v "$socket_dir:/data" \
-  redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499 \
+echo "redis fixture: docker run --pull $pull --network none $image" >&2
+container=$(docker run -d --rm --pull "$pull" --network none -v "$socket_dir:/data" "$image" \
   redis-server --port 0 --save '' --appendonly no --protected-mode yes \
   --unixsocket /data/redis.sock --unixsocketperm 777)
 attempt=0
