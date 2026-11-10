@@ -2,7 +2,8 @@
 # One job, tier1, on one fresh CI-SelfHosted server per run ([self-hosted, ci-8cpu]; a dispatch
 # may pick ci-16cpu or ci-32cpu). Its "Checks and tests in parallel" step runs every part at the
 # same time through .github/scripts/ci-run.sh (parts runner: .github/scripts/ci-parts.sh): policy,
-# docs, actionlint, fmt, clippy, rust-test (cargo nextest), npm-ci, then node-test, then vendor,
+# docs, actionlint, fmt, clippy, rust-test (cargo nextest, with the real-Redis store tests on a
+# private Redis from tests/allowance-redis.sh), npm-ci, then node-test, then vendor,
 # and npm-audit. The job summary holds the parts table; a failed part's log is printed in a group.
 #
 # Triggers and modes:
@@ -22,8 +23,7 @@
 # The server's job-started guard refuses forks, pull requests by anyone but the owner and every
 # event not listed above, before any step runs.
 # Not run here: the Docker stack suites, browser tests, live smoke tests, the credential scan
-# (tests/secret-scan.py) and the 11 real-Redis store tests, which need REDIS_TEST_URL. Run them
-# locally as ENGINEERING.md "Testing and validation" describes.
+# (tests/secret-scan.py). Run them locally as ENGINEERING.md "Testing and validation" describes.
 name: ci
 
 on:
