@@ -1,0 +1,34 @@
+{$CAP_STAGING_HOST} {
+	header X-Robots-Tag "noindex, nofollow"
+	header X-Content-Type-Options nosniff
+	header Content-Security-Policy "frame-ancestors 'none'"
+	@widget path /assets/* /{$CAP_STAGING_SITE_KEY}/challenge /{$CAP_STAGING_SITE_KEY}/redeem
+	handle @widget {
+		reverse_proxy 127.0.0.1:13000 {
+			header_up X-Forwarded-For {remote_host}
+		}
+	}
+	@config {
+		method GET
+		path /api/v1/config
+	}
+	handle @config {
+		reverse_proxy 127.0.0.1:13001
+	}
+	@session {
+		method POST
+		path /api/v1/sessions
+	}
+	handle @session {
+		header Cache-Control no-store
+		reverse_proxy 127.0.0.1:13001
+	}
+	@pilot path / /pilot.js
+	handle @pilot {
+		root * {$CAP_STAGING_PAGE_DIR}
+		file_server
+	}
+	handle {
+		respond 404
+	}
+}

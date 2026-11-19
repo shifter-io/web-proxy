@@ -1,4 +1,4 @@
-//! Google verification is always server-side; no configurable production verifier URL.
+//! Production keeps server-side Google verification. Cap is a staging-only pilot.
 use crate::{State, config::now_ms};
 use serde::Deserialize;
 
@@ -27,6 +27,32 @@ pub async fn verify(state: &State, token: &str, hostname: &str) -> Result<bool, 
     if state.cfg.captcha_secret.is_empty() {
         return Err(());
     }
+    if state.cfg.cap_staging {
+        let site_key = &state.cfg.captcha_site_key;
+        if !cap_site_matches(token, site_key) {
+            return Ok(false);
+        }
+        // The pilot's isolated Compose network is the only Cap verifier target.
+        let response = state
+            .captcha_client
+            .post(format!("http://capd:3000/{site_key}/siteverify"))
+            .json(&serde_json::json!({
+                "secret": state.cfg.captcha_secret,
+                "response": token,
+            }))
+            .send()
+            .await
+            .map_err(|_| ())?;
+        return match response.status().as_u16() {
+            200 => response
+                .json::<CapVerification>()
+                .await
+                .map(|result| result.success)
+                .map_err(|_| ()),
+            400 | 403 | 404 => Ok(false),
+            _ => Err(()),
+        };
+    }
     let response = state
         .captcha_client
         .post("https://www.google.com/recaptcha/api/siteverify")
@@ -44,9 +70,35 @@ pub async fn verify(state: &State, token: &str, hostname: &str) -> Result<bool, 
     Ok(valid(&result, hostname, now_ms()))
 }
 
+#[derive(Deserialize)]
+struct CapVerification {
+    success: bool,
+}
+
+fn cap_site_matches(token: &str, site_key: &str) -> bool {
+    let mut parts = token.split(':');
+    parts.next() == Some(site_key)
+        && parts.next().is_some_and(|part| !part.is_empty())
+        && parts.next().is_some_and(|part| !part.is_empty())
+        && parts.next().is_none()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cap_requires_the_expected_site_key_and_token_shape() {
+        assert!(cap_site_matches("pilot:challenge:answer", "pilot"));
+        for token in [
+            "other:challenge:answer",
+            "pilot::answer",
+            "pilot:answer",
+            "pilot:x:y:z",
+        ] {
+            assert!(!cap_site_matches(token, "pilot"));
+        }
+    }
     #[test]
     fn verifier_rejects_expiry_hostname_failure_and_quota_errors() {
         let now = 1_700_000_000_000;

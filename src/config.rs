@@ -173,6 +173,7 @@ pub struct Config {
     pub integrations: Vec<Integration>,
     pub captcha_site_key: String,
     pub captcha_secret: String,
+    pub cap_staging: bool,
     pub runtime_origin: String,
     pub region: String,
     pub upstream_host: String,
@@ -273,6 +274,35 @@ pub fn validate_captcha(site_key: &str, secret: &str, production: bool) -> Resul
     Ok(())
 }
 
+fn validate_cap_staging(
+    environment: &str,
+    role: &str,
+    control_origin: &str,
+    entries: &[Integration],
+    site_key: &str,
+    secret: &str,
+) -> Result<()> {
+    if environment != "development"
+        || role != "api"
+        || !control_origin.starts_with("https://")
+        || control_origin.contains('*')
+        || entries.len() != 1
+        || entries[0].origin != control_origin
+    {
+        bail!("Cap pilot requires a development API with one exact HTTPS control origin");
+    }
+    if site_key.is_empty()
+        || site_key.len() > 64
+        || !site_key
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"-_".contains(&c))
+        || secret.is_empty()
+    {
+        bail!("Cap pilot requires a site key and a private site secret");
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 struct Secrets {
     shifter: Account,
@@ -342,12 +372,25 @@ impl Config {
         if !["api", "gateway"].contains(&role.as_str()) {
             bail!("invalid ROLE");
         }
-        let captcha_site_key = val("RECAPTCHA_SITE_KEY", "");
+        let cap_staging = match val("CAPTCHA_PROVIDER", "recaptcha").as_str() {
+            "recaptcha" => false,
+            "cap-staging" => true,
+            _ => bail!("unknown CAPTCHA_PROVIDER"),
+        };
+        if cap_staging && (environment != "development" || role != "api") {
+            bail!("Cap pilot is disabled outside a development API");
+        }
+        let (site_key_var, secret_file_var) = if cap_staging {
+            ("CAP_STAGING_SITE_KEY", "CAP_STAGING_SECRET_FILE")
+        } else {
+            ("RECAPTCHA_SITE_KEY", "RECAPTCHA_SECRET_FILE")
+        };
+        let captcha_site_key = val(site_key_var, "");
         // Only the API process receives the verification secret.
         let captcha_secret = if role == "api" {
-            match env::var("RECAPTCHA_SECRET_FILE") {
+            match env::var(secret_file_var) {
                 Ok(path) if !path.is_empty() => std::fs::read_to_string(path)
-                    .map_err(|_| anyhow::anyhow!("cannot read RECAPTCHA_SECRET_FILE"))?
+                    .map_err(|_| anyhow::anyhow!("cannot read {secret_file_var}"))?
                     .trim()
                     .to_owned(),
                 _ => String::new(),
@@ -355,7 +398,16 @@ impl Config {
         } else {
             String::new()
         };
-        if role == "api" {
+        if cap_staging {
+            validate_cap_staging(
+                &environment,
+                &role,
+                &control_origin,
+                &integrations,
+                &captcha_site_key,
+                &captcha_secret,
+            )?;
+        } else if role == "api" {
             validate_captcha(&captcha_site_key, &captcha_secret, production)?;
         }
         let region = val("SHIFTER_REGION", "blr");
@@ -419,6 +471,7 @@ impl Config {
             integrations,
             captcha_site_key,
             captcha_secret,
+            cap_staging,
             runtime_origin,
             region,
             upstream_host,
@@ -580,6 +633,48 @@ mod tests {
         );
         assert!(
             validate_captcha("fixture", "6LeIxAcTAAAAAGG-vFI1TnRWxMZNFuojJ4WifJWe", true).is_err()
+        );
+    }
+
+    #[test]
+    fn cap_is_restricted_to_a_single_https_development_api_origin() {
+        let origin = "https://staging.example.com";
+        let entries = [Integration {
+            origin: origin.into(),
+            site: "pilot".into(),
+        }];
+        let valid = |environment, role, control, site_key, secret| {
+            validate_cap_staging(environment, role, control, &entries, site_key, secret)
+        };
+        assert!(valid("development", "api", origin, "cap_key", "secret").is_ok());
+        for environment in ["production", "test"] {
+            assert!(valid(environment, "api", origin, "cap_key", "secret").is_err());
+        }
+        assert!(valid("development", "gateway", origin, "cap_key", "secret").is_err());
+        assert!(
+            valid(
+                "development",
+                "api",
+                "http://staging.example.com",
+                "cap_key",
+                "secret"
+            )
+            .is_err()
+        );
+        assert!(
+            valid(
+                "development",
+                "api",
+                "https://example.com",
+                "cap_key",
+                "secret"
+            )
+            .is_err()
+        );
+        assert!(valid("development", "api", origin, "../admin", "secret").is_err());
+        assert!(valid("development", "api", origin, "cap_key", "").is_err());
+        assert!(
+            validate_cap_staging("development", "api", origin, &[], "cap_key", "secret").is_err()
         );
     }
 

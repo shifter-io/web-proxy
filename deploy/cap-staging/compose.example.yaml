@@ -1,0 +1,82 @@
+name: shifter-cap-staging
+services:
+  capd:
+    image: tiago2/cap:4@sha256:d8c8af1b871c4b10adefbc388844ee6de497c6d96923698ffa1aa4567316e86f
+    environment:
+      ADMIN_KEY: ${CAP_ADMIN_KEY:?set an isolated Cap admin key}
+      VALKEY_URL: redis://valkey:6379
+    ports: ["127.0.0.1:13000:3000"]
+    networks: [challenge, cap_state]
+    volumes: [cap-data:/usr/src/app/data]
+    depends_on:
+      valkey: {condition: service_healthy}
+    mem_limit: 512m
+    restart: unless-stopped
+  valkey:
+    image: valkey/valkey:9-alpine@sha256:4d67e1af80c653bd46c0bbe8de438c81a6535ab5a39b22f2100028f314005663
+    command: [valkey-server, --appendonly, "yes", --maxmemory, 128mb, --maxmemory-policy, noeviction]
+    networks: [cap_state]
+    volumes: [valkey-data:/data]
+    healthcheck:
+      test: [CMD, valkey-cli, ping]
+      interval: 3s
+      timeout: 2s
+      retries: 15
+    mem_limit: 256m
+    restart: unless-stopped
+  redis:
+    image: redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
+    command: [redis-server, --appendonly, "yes", --maxmemory, 96mb, --maxmemory-policy, noeviction]
+    networks: [session_state]
+    volumes: [redis-data:/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 3s
+      timeout: 2s
+      retries: 15
+    mem_limit: 192m
+    restart: unless-stopped
+  api:
+    image: shifter-cap-pilot:local
+    build: ../..
+    environment:
+      APP_ENV: development
+      ROLE: api
+      SHIFTER_REGION: fra
+      REDIS_URL: redis://redis:6379/
+      CONTROL_ORIGIN: https://${CAP_STAGING_HOST:?set the staging-only DNS name}
+      RUNTIME_ORIGIN: https://runtime.invalid
+      SESSION_SECONDS: "120"
+      CAPTCHA_PROVIDER: cap-staging
+      CAP_STAGING_SITE_KEY: ${CAP_STAGING_SITE_KEY:-unconfigured}
+      CAP_STAGING_SECRET_FILE: /run/secrets/cap_site_secret
+    secrets: [cap_site_secret]
+    ports: ["127.0.0.1:13001:3000"]
+    networks: [challenge, session_state]
+    depends_on:
+      redis: {condition: service_healthy}
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    restart: unless-stopped
+secrets:
+  cap_site_secret:
+    file: ${CAP_STAGING_SECRET_PATH:-./cap-site.secret}
+volumes:
+  cap-data:
+  valkey-data:
+  redis-data:
+networks:
+  challenge: {}
+  cap_state:
+    internal: true
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
+      com.docker.network.bridge.gateway_mode_ipv6: isolated
+  session_state:
+    internal: true
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
+      com.docker.network.bridge.gateway_mode_ipv6: isolated
