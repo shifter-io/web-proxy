@@ -6,6 +6,17 @@ versioned client explicitly without changing the shared production loader.
 
 ## Isolated staging overlays
 
+Both overlays target a staging stack that is not in this repository. They
+apply only to a project whose services are named exactly `api` and `gateway`
+and whose API already runs Cap: `CAPTCHA_PROVIDER=cap`, `CAP_SITES_FILE`,
+`CAP_PUBLIC_URL`, `CAP_VERIFY_URL` and an `INTEGRATIONS` list matching the Cap
+sites. They do not apply to this folder's `compose.example.yaml` (API only, Cap
+pilot) or to the root Compose files (`gateway-a`/`gateway-b`): merged there,
+the candidate overlay creates a new, unconfigured `gateway` service, and the
+dual overlay makes the API refuse to start because `CAPTCHA_ACCEPT_BOTH=true`
+requires those Cap settings. Check `docker compose config --services` lists
+only the existing services before `up`.
+
 `candidate.compose.example.yaml` can be merged with an existing staging stack
 to replace only the API and gateway image and bind a staging-only stable loader.
 Set `CAP_STAGING_IMAGE` to the pinned image and `CAP_STAGING_LOADER` to an
