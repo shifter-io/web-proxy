@@ -1,8 +1,10 @@
 # Cap cutover and rollback
 
-The current stable loader remains on SDK 1.0.10. SDK 1.0.12 refreshes the
-CAPTCHA config before each new session. An isolated canary can load its
-versioned client explicitly without changing the shared production loader.
+The stable loader now selects SDK 1.0.12, which refreshes the CAPTCHA config
+before each new session. Deploying this source promotes the loader; it does not
+enable Cap in the server configuration. Older immutable SDK assets are retained.
+An isolated canary can load a versioned client explicitly. The existing native
+systemd deployment uses the phased [cutover helper](../../scripts/cap-cutover.md).
 
 ## Isolated staging overlays
 
