@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shifter Cap staging pilot</title>
+<style>
+  body { font: 1rem/1.55 Georgia, serif; max-width: 44rem; margin: 10vh auto; padding: 1.5rem;
+    color: #17372e; background: #f4f2e8; }
+  button { font: inherit; padding: .45rem .8rem; }
+</style>
+<main>
+  <h1>Shifter Cap staging pilot</h1>
+  <p>This page tests session creation only. It does not open a proxy connection or use production credentials.</p>
+  <cap-widget id="captcha"></cap-widget>
+  <p id="result" role="status">Loading the staging verifier…</p>
+  <button id="start" disabled>Create staging session</button>
+  <button id="replay" disabled>Check replay rejection</button>
+</main>
+<script defer src="/pilot.js"></script>
+</html>
