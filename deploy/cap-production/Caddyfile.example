@@ -1,0 +1,41 @@
+{$CAP_PUBLIC_HOST} {
+	header X-Content-Type-Options nosniff
+	header X-Robots-Tag "noindex, nofollow"
+	@widget {
+		method GET POST OPTIONS
+		path /assets/*
+	}
+	handle @widget {
+		reverse_proxy 127.0.0.1:13000 {
+			header_up X-Forwarded-For {remote_host}
+		}
+	}
+	@challenge {
+		method POST OPTIONS
+		path_regexp challenge ^/[a-f0-9]{10}/(challenge|redeem)$
+	}
+	handle @challenge {
+		reverse_proxy 127.0.0.1:13000 {
+			header_up X-Forwarded-For {remote_host}
+		}
+	}
+	handle {
+		respond 404
+	}
+}
+
+# Restricted HTTPS backend listener: exact API egress IPs only, never 0.0.0.0/0.
+# Apply the same restriction in the host firewall. Dashboard remains loopback-only.
+https://{$CAP_PUBLIC_HOST}:8443 {
+	@verify {
+		remote_ip {$CAP_VERIFY_ALLOWLIST}
+		method POST
+		path_regexp verify ^/[a-f0-9]{10}/siteverify$
+	}
+	handle @verify {
+		reverse_proxy 127.0.0.1:13000
+	}
+	handle {
+		respond 404
+	}
+}

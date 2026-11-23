@@ -1,0 +1,9 @@
+# Overlay for the existing isolated api/gateway staging stack, not production.
+services:
+  api:
+    environment:
+      CAP_PUBLIC_URL: ${CAP_PROD_PUBLIC_URL:?set the production Cap public URL}
+      CAP_VERIFY_URL: ${CAP_PROD_VERIFY_URL:?set the restricted HTTPS verifier URL}
+secrets:
+  cap_sites:
+    file: ${CAP_PROD_STAGING_SITES_FILE:?set the staging-only origin mapping file}

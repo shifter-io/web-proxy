@@ -1,0 +1,63 @@
+name: shifter-cap-production
+services:
+  capd:
+    image: tiago2/cap:4@sha256:d8c8af1b871c4b10adefbc388844ee6de497c6d96923698ffa1aa4567316e86f
+    env_file: ./cap.env
+    environment:
+      VALKEY_TLS_CA: /run/cap-ca.pem
+      REDIS_PREFIX: "cap:"
+      ANALYTICS: redis
+    volumes:
+      - ./tls/ca.crt:/run/cap-ca.pem:ro
+      - ./cap-data:/usr/src/app/data
+    ports: ["127.0.0.1:13000:3000"]
+    networks: [ingress, cap_state]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 1g
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, bun, -e, "const r=await fetch('http://127.0.0.1:3000/health');if(!r.ok)process.exit(1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 30s
+    depends_on:
+      valkey: {condition: service_healthy}
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+  valkey:
+    image: valkey/valkey:9-alpine@sha256:4d67e1af80c653bd46c0bbe8de438c81a6535ab5a39b22f2100028f314005663
+    user: "999:1000"
+    env_file: ./valkey.env
+    command: [valkey-server, /etc/valkey/valkey.conf]
+    volumes:
+      - ./valkey.conf:/etc/valkey/valkey.conf:ro
+      - ./users.acl:/etc/valkey/users.acl:ro
+      - ./tls:/etc/valkey/tls:ro
+      - ./valkey-data:/data
+    networks: [cap_state]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 1536m
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD-SHELL, 'test "$$(valkey-cli --tls --cacert /etc/valkey/tls/ca.crt --user cap -h valkey ping)" = PONG']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+networks:
+  ingress: {}
+  cap_state:
+    internal: true
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
+      com.docker.network.bridge.gateway_mode_ipv6: isolated
