@@ -5,7 +5,7 @@ use crate::{
 };
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, State as AppState, rejection::JsonRejection},
+    extract::{DefaultBodyLimit, Query, State as AppState, rejection::JsonRejection},
     http::{
         HeaderMap, HeaderValue, Method, StatusCode,
         header::{AUTHORIZATION, CONTENT_TYPE},
@@ -195,12 +195,41 @@ pub fn router(s: &State) -> Router<State> {
         .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(cors)
 }
-async fn config(AppState(s): AppState<State>, h: HeaderMap) -> Result<Json<Value>> {
+#[derive(Deserialize)]
+struct SdkCapabilities {
+    captcha: Option<String>,
+}
+
+fn advertise_cap(preferred: bool, accept_both: bool, capability: Option<&str>) -> bool {
+    preferred && (!accept_both || capability == Some("cap"))
+}
+
+async fn config(
+    AppState(s): AppState<State>,
+    Query(sdk): Query<SdkCapabilities>,
+    h: HeaderMap,
+) -> Result<Json<Value>> {
     let (site, _) = integration(&h, &s)?;
-    Ok(Json(
-        json!({"site":site.site, "countries":countries().iter().map(|(code,name)|json!({"code":code,"name":name})).collect::<Vec<_>>(),
-        "runtimeOrigin":s.cfg.runtime_origin,"captchaSiteKey":s.cfg.captcha_site_key,"protocolVersion":1}),
-    ))
+    let mut body = json!({"site":site.site, "countries":countries().iter().map(|(code,name)|json!({"code":code,"name":name})).collect::<Vec<_>>(),
+        "runtimeOrigin":s.cfg.runtime_origin,"captchaSiteKey":s.cfg.captcha_site_key,"captchaProvider":"recaptcha","protocolVersion":1});
+    if let Some(cap) = s.cfg.cap.as_ref().filter(|_| {
+        advertise_cap(
+            s.cfg.cap_preferred,
+            s.cfg.captcha_accept_both,
+            sdk.captcha.as_deref(),
+        )
+    }) {
+        // Public values only: the site key and where the widget and challenges live.
+        let key = cap
+            .site(&site.origin)
+            .map(|c| c.site_key.as_str())
+            .unwrap_or_default();
+        body["captchaProvider"] = json!("cap");
+        body["captchaSiteKey"] = json!(key);
+        body["capEndpoint"] = json!(format!("{}/{key}/", cap.public_url));
+        body["capAssets"] = json!(format!("{}/assets/", cap.public_url));
+    }
+    Ok(Json(body))
 }
 async fn start(
     AppState(s): AppState<State>,
@@ -252,7 +281,7 @@ async fn start(
             .map_err(storage)?;
         expected.as_deref() == Some(hostname.as_str())
     } else {
-        captcha::verify(&s, &input.captcha_token, &hostname)
+        captcha::verify_for_integration(&s, &input.captcha_token, &hostname, &site.origin)
             .await
             .map_err(|_| {
                 Error(
@@ -399,4 +428,18 @@ async fn stop(AppState(s): AppState<State>, h: HeaderMap) -> Result<Json<Value>>
     let current = session(&h, &s).await?;
     s.store.change(&current, None).await.map_err(storage)?;
     Ok(Json(json!({"status":"stopped"})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::advertise_cap;
+
+    #[test]
+    fn dual_mode_only_advertises_cap_to_clients_that_support_refresh() {
+        assert!(!advertise_cap(false, true, Some("cap")));
+        assert!(!advertise_cap(true, true, None));
+        assert!(!advertise_cap(true, true, Some("unexpected")));
+        assert!(advertise_cap(true, true, Some("cap")));
+        assert!(advertise_cap(true, false, None));
+    }
 }
