@@ -1,3 +1,4 @@
+use crate::captcha_config::{self, CaptchaSettings};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::{env, net::IpAddr};
@@ -171,13 +172,7 @@ pub struct Config {
     pub redis_ca_file: Option<String>,
     pub control_origin: String,
     pub integrations: Vec<Integration>,
-    pub captcha_site_key: String,
-    pub captcha_secret: String,
-    pub cap_staging: bool,
-    pub cap_preferred: bool,
-    pub captcha_accept_both: bool,
-    /// Cap verifier settings, also loaded during a dual-provider transition.
-    pub cap: Option<CapConfig>,
+    pub captcha: CaptchaSettings,
     pub runtime_origin: String,
     pub region: String,
     pub upstream_host: String,
@@ -195,78 +190,6 @@ pub struct Config {
     pub test_mode: bool,
     pub web_dir: String,
 }
-/// One Cap site key per embedding origin, so a token solved for one website
-/// cannot start a session on another (Cap tokens carry no hostname).
-#[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct CapSite {
-    /// Exactly an INTEGRATIONS origin, wildcard patterns included.
-    pub origin: String,
-    pub site_key: String,
-    pub secret: String,
-}
-
-#[derive(Clone)]
-pub struct CapConfig {
-    /// Private base URL the API calls for /<siteKey>/siteverify.
-    pub verify_url: String,
-    /// Public base URL browsers load the widget and challenges from.
-    pub public_url: String,
-    pub sites: Vec<CapSite>,
-}
-
-impl CapConfig {
-    pub fn site(&self, integration_origin: &str) -> Option<&CapSite> {
-        self.sites.iter().find(|s| s.origin == integration_origin)
-    }
-}
-
-fn valid_cap_key(key: &str) -> bool {
-    !key.is_empty()
-        && key.len() <= 64
-        && key
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || b"-_".contains(&c))
-}
-
-pub fn validate_cap(cap: &CapConfig, entries: &[Integration], production: bool) -> Result<()> {
-    let public = url::Url::parse(&cap.public_url)
-        .map_err(|_| anyhow::anyhow!("CAP_PUBLIC_URL must be an absolute URL"))?;
-    if !["http", "https"].contains(&public.scheme())
-        || public.path() != "/"
-        || public.query().is_some()
-        || (production && public.scheme() != "https")
-    {
-        bail!("CAP_PUBLIC_URL must be a bare http(s) origin, HTTPS in production");
-    }
-    let verify = url::Url::parse(&cap.verify_url)
-        .map_err(|_| anyhow::anyhow!("CAP_VERIFY_URL must be an absolute URL"))?;
-    if !["http", "https"].contains(&verify.scheme()) {
-        bail!("CAP_VERIFY_URL must be http(s)");
-    }
-    for entry in entries {
-        if cap.site(&entry.origin).is_none() {
-            bail!("CAP_SITES_FILE has no site key for {}", entry.origin);
-        }
-    }
-    let mut keys = std::collections::HashSet::new();
-    for site in &cap.sites {
-        if !valid_cap_key(&site.site_key) || site.secret.is_empty() {
-            bail!("every CAP_SITES_FILE entry needs a valid siteKey and a secret");
-        }
-        if !entries.iter().any(|e| e.origin == site.origin) {
-            bail!(
-                "CAP_SITES_FILE origin {} is not in INTEGRATIONS",
-                site.origin
-            );
-        }
-        if !keys.insert(site.site_key.as_str()) {
-            bail!("each origin needs its own Cap site key");
-        }
-    }
-    Ok(())
-}
-
 #[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Integration {
@@ -336,49 +259,6 @@ pub fn integrations(value: &str, runtime: &str, production: bool) -> Result<Vec<
     Ok(entries)
 }
 
-pub fn validate_captcha(site_key: &str, secret: &str, production: bool) -> Result<()> {
-    const TEST_SITE: &str = "6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI";
-    const TEST_SECRET: &str = "6LeIxAcTAAAAAGG-vFI1TnRWxMZNFuojJ4WifJWe";
-    if production
-        && (site_key.is_empty()
-            || secret.is_empty()
-            || site_key == TEST_SITE
-            || secret == TEST_SECRET)
-    {
-        bail!("production API requires real reCAPTCHA v2 credentials");
-    }
-    Ok(())
-}
-
-fn validate_cap_staging(
-    environment: &str,
-    role: &str,
-    control_origin: &str,
-    entries: &[Integration],
-    site_key: &str,
-    secret: &str,
-) -> Result<()> {
-    if environment != "development"
-        || role != "api"
-        || !control_origin.starts_with("https://")
-        || control_origin.contains('*')
-        || entries.len() != 1
-        || entries[0].origin != control_origin
-    {
-        bail!("Cap pilot requires a development API with one exact HTTPS control origin");
-    }
-    if site_key.is_empty()
-        || site_key.len() > 64
-        || !site_key
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || b"-_".contains(&c))
-        || secret.is_empty()
-    {
-        bail!("Cap pilot requires a site key and a private site secret");
-    }
-    Ok(())
-}
-
 #[derive(Deserialize)]
 struct Secrets {
     shifter: Account,
@@ -415,172 +295,24 @@ impl Config {
             bail!("APP_ENV must be development, test, or production");
         }
         let production = environment == "production";
+        let test_mode = environment == "test";
         let control_origin = val("CONTROL_ORIGIN", "http://localhost:8080");
         let runtime_origin = val("RUNTIME_ORIGIN", "http://localhost:8081");
-        let configured_integrations = if production {
-            env::var("INTEGRATIONS").context("production requires explicit INTEGRATIONS")?
-        } else {
-            val(
-                "INTEGRATIONS",
-                &serde_json::json!([{"origin":control_origin,"site":"local"}]).to_string(),
-            )
-        };
-        let integrations = integrations(&configured_integrations, &runtime_origin, production)?;
-        let redis = match env::var("REDIS_URL_FILE") {
-            Ok(path) => std::fs::read_to_string(path)
-                .map_err(|_| anyhow::anyhow!("cannot read REDIS_URL_FILE"))?
-                .trim()
-                .to_owned(),
-            Err(_) => val("REDIS_URL", "redis://redis:6379/"),
-        };
-        if production {
-            let (host, port) = production_redis(&redis)?;
-            let addresses: Vec<_> = tokio::net::lookup_host((host.as_str(), port))
-                .await
-                .map_err(|_| anyhow::anyhow!("production Redis private DNS lookup failed"))?
-                .collect();
-            if addresses.is_empty() || addresses.iter().any(|a| !private_ip(a.ip())) {
-                bail!("production Redis must resolve only to private RFC1918/ULA addresses");
-            }
-        }
-        let test_mode = environment == "test";
+        let integrations = load_integrations(&control_origin, &runtime_origin, production)?;
+        let redis = load_redis(production).await?;
         let role = val("ROLE", "api");
         if !["api", "gateway"].contains(&role.as_str()) {
             bail!("invalid ROLE");
         }
-        let (cap_staging, cap_preferred) = match val("CAPTCHA_PROVIDER", "recaptcha").as_str() {
-            "recaptcha" => (false, false),
-            "cap-staging" => (true, false),
-            "cap" => (false, true),
-            _ => bail!("unknown CAPTCHA_PROVIDER"),
+        let scope = captcha_config::Scope {
+            environment: &environment,
+            role: &role,
+            control_origin: &control_origin,
+            integrations: &integrations,
         };
-        if cap_staging && (environment != "development" || role != "api") {
-            bail!("Cap pilot is disabled outside a development API");
-        }
-        let captcha_accept_both = match val("CAPTCHA_ACCEPT_BOTH", "false").as_str() {
-            "true" => true,
-            "false" => false,
-            _ => bail!("CAPTCHA_ACCEPT_BOTH must be true or false"),
-        };
-        if captcha_accept_both && (cap_staging || test_mode) {
-            bail!("CAPTCHA_ACCEPT_BOTH requires a real CAPTCHA provider outside test mode");
-        }
-        let needs_recaptcha = !cap_preferred || captcha_accept_both;
-        let (site_key_var, secret_file_var) = if cap_staging {
-            ("CAP_STAGING_SITE_KEY", "CAP_STAGING_SECRET_FILE")
-        } else {
-            ("RECAPTCHA_SITE_KEY", "RECAPTCHA_SECRET_FILE")
-        };
-        let captcha_site_key = if needs_recaptcha {
-            val(site_key_var, "")
-        } else {
-            String::new()
-        };
-        // Only the API process receives the verification secret.
-        let captcha_secret = if role == "api" && needs_recaptcha {
-            match env::var(secret_file_var) {
-                Ok(path) if !path.is_empty() => std::fs::read_to_string(path)
-                    .map_err(|_| anyhow::anyhow!("cannot read {secret_file_var}"))?
-                    .trim()
-                    .to_owned(),
-                _ => String::new(),
-            }
-        } else {
-            String::new()
-        };
-        let cap = if cap_preferred || captcha_accept_both {
-            // Site secrets come from a private file, only in the API process.
-            let sites: Vec<CapSite> = if role == "api" {
-                let path = env::var("CAP_SITES_FILE")
-                    .context("Cap verification requires CAP_SITES_FILE")?;
-                let text = std::fs::read_to_string(&path)
-                    .map_err(|_| anyhow::anyhow!("cannot read CAP_SITES_FILE"))?;
-                serde_json::from_str(&text)
-                    .map_err(|_| anyhow::anyhow!("invalid CAP_SITES_FILE JSON"))?
-            } else {
-                vec![]
-            };
-            let cap = CapConfig {
-                verify_url: val("CAP_VERIFY_URL", "http://capd:3000")
-                    .trim_end_matches('/')
-                    .to_owned(),
-                public_url: val("CAP_PUBLIC_URL", "").trim_end_matches('/').to_owned(),
-                sites,
-            };
-            if role == "api" {
-                validate_cap(&cap, &integrations, production)?;
-            }
-            Some(cap)
-        } else {
-            None
-        };
-        if cap_staging {
-            validate_cap_staging(
-                &environment,
-                &role,
-                &control_origin,
-                &integrations,
-                &captcha_site_key,
-                &captcha_secret,
-            )?;
-        } else if role == "api" && needs_recaptcha {
-            validate_captcha(
-                &captcha_site_key,
-                &captcha_secret,
-                production || captcha_accept_both,
-            )?;
-        }
-        let region = val("SHIFTER_REGION", "blr");
-        if !["fra", "ams", "lon", "nyc", "tor", "sgp", "blr", "syd"].contains(&region.as_str()) {
-            bail!("invalid region");
-        }
-        let upstream_host = if test_mode {
-            "mock-upstream".into()
-        } else {
-            format!("{region}.p.shifter.io")
-        };
-        let upstream_port = if test_mode { 1080 } else { 443 };
-        let (account, password) = if test_mode {
-            ("fixture".into(), "fixture-password".into())
-        } else if role == "gateway" {
-            let path = val("CREDENTIALS_FILE", "/run/secrets/shifter_credentials");
-            let contents =
-                std::fs::read_to_string(path).context("cannot read credential secret")?;
-            // Do not expose TOML parse errors: they may include the secret's source line.
-            let secrets: Secrets = toml::from_str(&contents)
-                .map_err(|_| anyhow::anyhow!("invalid credential secret"))?;
-            (
-                secrets
-                    .shifter
-                    .account
-                    .trim_start_matches("customer-")
-                    .to_string(),
-                secrets.shifter.password,
-            )
-        } else {
-            (String::new(), String::new())
-        };
-        if role == "gateway" {
-            if account.is_empty()
-                || !account
-                    .bytes()
-                    .all(|x| x.is_ascii_alphanumeric() || b"._".contains(&x))
-            {
-                bail!("invalid account syntax");
-            }
-            if password.is_empty() || !password.is_ascii() || password.len() > 255 {
-                bail!("invalid SOCKS password length/encoding");
-            }
-        }
-        let upstream_ips = if role == "gateway" {
-            tokio::net::lookup_host((upstream_host.as_str(), upstream_port))
-                .await
-                .context("upstream DNS unavailable")?
-                .map(|x| x.ip())
-                .collect()
-        } else {
-            vec![]
-        };
+        let captcha = captcha_config::load(&scope, &|key: &str| env::var(key).ok())?;
+        let region = region()?;
+        let upstream = Upstream::load(&role, &region, test_mode).await?;
         let cfg = Self {
             role,
             replica: val("REPLICA", "api"),
@@ -589,19 +321,14 @@ impl Config {
             redis_ca_file: env::var("REDIS_CA_FILE").ok().filter(|v| !v.is_empty()),
             control_origin,
             integrations,
-            captcha_site_key,
-            captcha_secret,
-            cap_staging,
-            cap_preferred,
-            captcha_accept_both,
-            cap,
+            captcha,
             runtime_origin,
             region,
-            upstream_host,
-            upstream_port,
-            upstream_ips,
-            account,
-            password,
+            upstream_host: upstream.host,
+            upstream_port: upstream.port,
+            upstream_ips: upstream.ips,
+            account: upstream.account,
+            password: upstream.password,
             duration_ms: allowance_duration(number("SESSION_SECONDS", 86400)?)?,
             byte_limit: number("BYTE_LIMIT", 10_000_000_000)?,
             max_streams: number("MAX_STREAMS", 64)? as usize,
@@ -623,6 +350,116 @@ impl Config {
     pub fn username(&self, country: &str, sid: &str) -> Result<String> {
         routing_username(&self.account, country, sid)
     }
+}
+
+fn load_integrations(control: &str, runtime: &str, production: bool) -> Result<Vec<Integration>> {
+    let configured = if production {
+        env::var("INTEGRATIONS").context("production requires explicit INTEGRATIONS")?
+    } else {
+        val(
+            "INTEGRATIONS",
+            &serde_json::json!([{"origin":control,"site":"local"}]).to_string(),
+        )
+    };
+    integrations(&configured, runtime, production)
+}
+
+async fn load_redis(production: bool) -> Result<String> {
+    let redis = match env::var("REDIS_URL_FILE") {
+        Ok(path) => std::fs::read_to_string(path)
+            .map_err(|_| anyhow::anyhow!("cannot read REDIS_URL_FILE"))?
+            .trim()
+            .to_owned(),
+        Err(_) => val("REDIS_URL", "redis://redis:6379/"),
+    };
+    if production {
+        let (host, port) = production_redis(&redis)?;
+        let addresses: Vec<_> = tokio::net::lookup_host((host.as_str(), port))
+            .await
+            .map_err(|_| anyhow::anyhow!("production Redis private DNS lookup failed"))?
+            .collect();
+        if addresses.is_empty() || addresses.iter().any(|a| !private_ip(a.ip())) {
+            bail!("production Redis must resolve only to private RFC1918/ULA addresses");
+        }
+    }
+    Ok(redis)
+}
+
+fn region() -> Result<String> {
+    let region = val("SHIFTER_REGION", "blr");
+    if !["fra", "ams", "lon", "nyc", "tor", "sgp", "blr", "syd"].contains(&region.as_str()) {
+        bail!("invalid region");
+    }
+    Ok(region)
+}
+
+/// The Shifter upstream a gateway connects to, and its account.
+struct Upstream {
+    host: String,
+    port: u16,
+    ips: Vec<IpAddr>,
+    account: String,
+    password: String,
+}
+
+impl Upstream {
+    async fn load(role: &str, region: &str, test_mode: bool) -> Result<Self> {
+        let (host, port) = if test_mode {
+            ("mock-upstream".to_owned(), 1080)
+        } else {
+            (format!("{region}.p.shifter.io"), 443)
+        };
+        let (account, password) = upstream_account(role, test_mode)?;
+        let ips = if role == "gateway" {
+            tokio::net::lookup_host((host.as_str(), port))
+                .await
+                .context("upstream DNS unavailable")?
+                .map(|x| x.ip())
+                .collect()
+        } else {
+            vec![]
+        };
+        Ok(Self {
+            host,
+            port,
+            ips,
+            account,
+            password,
+        })
+    }
+}
+
+fn upstream_account(role: &str, test_mode: bool) -> Result<(String, String)> {
+    let (account, password) = if test_mode {
+        ("fixture".into(), "fixture-password".into())
+    } else if role == "gateway" {
+        read_credentials()?
+    } else {
+        (String::new(), String::new())
+    };
+    if role == "gateway" {
+        if account.is_empty()
+            || !account
+                .bytes()
+                .all(|x| x.is_ascii_alphanumeric() || b"._".contains(&x))
+        {
+            bail!("invalid account syntax");
+        }
+        if password.is_empty() || !password.is_ascii() || password.len() > 255 {
+            bail!("invalid SOCKS password length/encoding");
+        }
+    }
+    Ok((account, password))
+}
+
+fn read_credentials() -> Result<(String, String)> {
+    let path = val("CREDENTIALS_FILE", "/run/secrets/shifter_credentials");
+    let contents = std::fs::read_to_string(path).context("cannot read credential secret")?;
+    // Do not expose TOML parse errors: they may include the secret's source line.
+    let secrets: Secrets =
+        toml::from_str(&contents).map_err(|_| anyhow::anyhow!("invalid credential secret"))?;
+    let account = secrets.shifter.account.trim_start_matches("customer-");
+    Ok((account.to_string(), secrets.shifter.password))
 }
 
 /// Shifter-pool countries are pinned with `pool-shifter`; the rest use the global pool.
@@ -731,7 +568,7 @@ mod tests {
     }
 
     #[test]
-    fn integrations_and_captcha_are_strict() {
+    fn integrations_are_strict() {
         let value = r#"[{"origin":"https://example.com","site":"shifter"},{"origin":"https://second.example.com","site":"ip-info"}]"#;
         assert_eq!(
             integrations(value, "https://proxy.example.net", true)
@@ -750,55 +587,6 @@ mod tests {
         ] {
             assert!(integrations(value, "https://proxy.example.net", true).is_err());
         }
-        assert!(validate_captcha("", "", true).is_err());
-        assert!(
-            validate_captcha("6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI", "fixture", true).is_err()
-        );
-        assert!(
-            validate_captcha("fixture", "6LeIxAcTAAAAAGG-vFI1TnRWxMZNFuojJ4WifJWe", true).is_err()
-        );
-    }
-
-    #[test]
-    fn cap_is_restricted_to_a_single_https_development_api_origin() {
-        let origin = "https://staging.example.com";
-        let entries = [Integration {
-            origin: origin.into(),
-            site: "pilot".into(),
-        }];
-        let valid = |environment, role, control, site_key, secret| {
-            validate_cap_staging(environment, role, control, &entries, site_key, secret)
-        };
-        assert!(valid("development", "api", origin, "cap_key", "secret").is_ok());
-        for environment in ["production", "test"] {
-            assert!(valid(environment, "api", origin, "cap_key", "secret").is_err());
-        }
-        assert!(valid("development", "gateway", origin, "cap_key", "secret").is_err());
-        assert!(
-            valid(
-                "development",
-                "api",
-                "http://staging.example.com",
-                "cap_key",
-                "secret"
-            )
-            .is_err()
-        );
-        assert!(
-            valid(
-                "development",
-                "api",
-                "https://example.com",
-                "cap_key",
-                "secret"
-            )
-            .is_err()
-        );
-        assert!(valid("development", "api", origin, "../admin", "secret").is_err());
-        assert!(valid("development", "api", origin, "cap_key", "").is_err());
-        assert!(
-            validate_cap_staging("development", "api", origin, &[], "cap_key", "secret").is_err()
-        );
     }
 
     #[test]
@@ -847,88 +635,6 @@ mod tests {
             SHIFTER_POOL_COUNTRIES.len() + GLOBAL_POOL_COUNTRIES.len()
         );
         assert!(routing_username("acct", "xx", sid).is_err());
-    }
-
-    #[test]
-    fn cap_needs_one_key_per_integration_and_https_in_production() {
-        let entries = vec![
-            Integration {
-                origin: "https://shifter.io".into(),
-                site: "shifter".into(),
-            },
-            Integration {
-                origin: "https://*.shifter-bitch.com".into(),
-                site: "shifter".into(),
-            },
-        ];
-        let site = |origin: &str, key: &str| CapSite {
-            origin: origin.into(),
-            site_key: key.into(),
-            secret: "secret".into(),
-        };
-        let cap = |public: &str, sites: Vec<CapSite>| CapConfig {
-            verify_url: "http://capd:3000".into(),
-            public_url: public.into(),
-            sites,
-        };
-        let both = vec![
-            site("https://shifter.io", "main"),
-            site("https://*.shifter-bitch.com", "previews"),
-        ];
-        assert!(
-            validate_cap(
-                &cap("https://cap.example.com", both.clone()),
-                &entries,
-                true
-            )
-            .is_ok()
-        );
-        assert!(
-            validate_cap(
-                &cap("http://cap.example.com", both.clone()),
-                &entries,
-                false
-            )
-            .is_ok()
-        );
-        // Production needs HTTPS for the widget origin, and a bare origin.
-        assert!(
-            validate_cap(&cap("http://cap.example.com", both.clone()), &entries, true).is_err()
-        );
-        assert!(
-            validate_cap(
-                &cap("https://cap.example.com/x", both.clone()),
-                &entries,
-                true
-            )
-            .is_err()
-        );
-        // Every integration needs its own key; unknown origins and shared keys are refused.
-        assert!(
-            validate_cap(
-                &cap("https://cap.example.com", both[..1].to_vec()),
-                &entries,
-                true
-            )
-            .is_err()
-        );
-        let shared = vec![
-            site("https://shifter.io", "same"),
-            site("https://*.shifter-bitch.com", "same"),
-        ];
-        assert!(validate_cap(&cap("https://cap.example.com", shared), &entries, true).is_err());
-        let mut extra = both.clone();
-        extra.push(site("https://other.example", "other"));
-        assert!(validate_cap(&cap("https://cap.example.com", extra), &entries, true).is_err());
-        let mut bad = both.clone();
-        bad[0].secret = String::new();
-        assert!(validate_cap(&cap("https://cap.example.com", bad), &entries, true).is_err());
-        assert_eq!(
-            cap("https://cap.example.com", both)
-                .site("https://*.shifter-bitch.com")
-                .map(|s| s.site_key.as_str()),
-            Some("previews")
-        );
     }
 
     #[test]

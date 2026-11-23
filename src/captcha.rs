@@ -1,9 +1,6 @@
 //! Server-side CAPTCHA verification: Google reCAPTCHA, or self-hosted Cap
 //! (CAPTCHA_PROVIDER=cap, one site key per embedding origin).
-use crate::{
-    State,
-    config::{CapConfig, now_ms},
-};
+use crate::{State, captcha_config::CapConfig, config::now_ms};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -28,27 +25,23 @@ pub fn valid(result: &Verification, hostname: &str, now: u64) -> bool {
 }
 
 pub async fn verify(state: &State, token: &str, hostname: &str) -> Result<bool, ()> {
-    if state.cfg.captcha_secret.is_empty() {
+    let settings = &state.cfg.captcha;
+    if settings.secret.is_empty() {
         return Err(());
     }
-    if state.cfg.cap_staging {
+    if settings.cap_staging {
         // The pilot's isolated Compose network is the only Cap verifier target.
-        return cap_siteverify(
-            state,
-            "http://capd:3000",
-            &state.cfg.captcha_site_key,
-            &state.cfg.captcha_secret,
-            token,
-        )
-        .await;
+        let site = Site {
+            base: "http://capd:3000",
+            key: &settings.site_key,
+            secret: &settings.secret,
+        };
+        return cap_siteverify(&state.captcha_client, &site, token).await;
     }
     let response = state
         .captcha_client
         .post("https://www.google.com/recaptcha/api/siteverify")
-        .form(&[
-            ("secret", state.cfg.captcha_secret.as_str()),
-            ("response", token),
-        ])
+        .form(&[("secret", settings.secret.as_str()), ("response", token)])
         .send()
         .await
         .map_err(|_| ())?;
@@ -79,15 +72,18 @@ pub async fn verify_for_integration(
     hostname: &str,
     integration_origin: &str,
 ) -> Result<bool, ()> {
-    match verifier(state.cfg.cap.as_ref(), state.cfg.captcha_accept_both, token) {
-        Verifier::Cap(cap) => verify_cap(state, cap, token, integration_origin).await,
+    let settings = &state.cfg.captcha;
+    match verifier(settings.cap.as_ref(), settings.accept_both, token) {
+        Verifier::Cap(cap) => {
+            verify_cap(&state.captcha_client, cap, token, integration_origin).await
+        }
         Verifier::Legacy => verify(state, token, hostname).await,
     }
 }
 
 /// Use the Cap key for the matched integration, not one supplied by the browser.
 async fn verify_cap(
-    state: &State,
+    client: &reqwest::Client,
     cap: &CapConfig,
     token: &str,
     integration_origin: &str,
@@ -95,26 +91,36 @@ async fn verify_cap(
     let Some(site) = cap.site(integration_origin) else {
         return Err(());
     };
-    cap_siteverify(state, &cap.verify_url, &site.site_key, &site.secret, token).await
+    let site = Site {
+        base: &cap.verify_url,
+        key: &site.site_key,
+        secret: &site.secret,
+    };
+    cap_siteverify(client, &site, token).await
 }
 
+/// One Cap site as the verifier sees it: its base URL, key and secret.
+struct Site<'a> {
+    base: &'a str,
+    key: &'a str,
+    secret: &'a str,
+}
+
+/// 200 with `success` decides; 400, 403 and 404 reject; anything else is unavailable.
 async fn cap_siteverify(
-    state: &State,
-    base: &str,
-    site_key: &str,
-    secret: &str,
+    client: &reqwest::Client,
+    site: &Site<'_>,
     token: &str,
 ) -> Result<bool, ()> {
-    if secret.is_empty() {
+    if site.secret.is_empty() {
         return Err(());
     }
-    if !cap_site_matches(token, site_key) {
+    if !cap_site_matches(token, site.key) {
         return Ok(false);
     }
-    let response = state
-        .captcha_client
-        .post(format!("{base}/{site_key}/siteverify"))
-        .json(&serde_json::json!({"secret": secret, "response": token}))
+    let response = client
+        .post(format!("{}/{}/siteverify", site.base, site.key))
+        .json(&serde_json::json!({"secret": site.secret, "response": token}))
         .send()
         .await
         .map_err(|_| ())?;
@@ -145,6 +151,8 @@ fn cap_site_matches(token: &str, site_key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::captcha_config::CapSite;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn dual_verification_routes_each_token_once_even_if_the_cap_key_is_wrong() {
@@ -210,5 +218,155 @@ mod tests {
         v.success = true;
         v.challenge_ts = None;
         assert!(!valid(&v, "example.com", now));
+    }
+
+    const TOKEN: &str = "pilot:challenge:answer";
+
+    fn client() -> reqwest::Client {
+        reqwest::Client::builder().no_proxy().build().unwrap()
+    }
+
+    /// Reads one HTTP request: its head and a body of Content-Length bytes.
+    async fn read_request(socket: &mut tokio::net::TcpStream) -> String {
+        let mut data = Vec::new();
+        let mut chunk = [0; 4096];
+        loop {
+            let n = socket.read(&mut chunk).await.unwrap();
+            data.extend_from_slice(&chunk[..n]);
+            let text = String::from_utf8_lossy(&data).into_owned();
+            let Some((head, body)) = text.split_once("\r\n\r\n") else {
+                assert!(n > 0, "connection closed before the request head ended");
+                continue;
+            };
+            let length = head
+                .lines()
+                .find_map(|line| {
+                    let line = line.to_ascii_lowercase();
+                    line.strip_prefix("content-length:")
+                        .map(|v| v.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            if body.len() >= length || n == 0 {
+                return text;
+            }
+        }
+    }
+
+    /// A one-request verifier on 127.0.0.1 answering `status` and `body`. Returns its base
+    /// URL and a task that yields the raw request it received.
+    async fn stub(status: u16, body: &'static str) -> (String, tokio::task::JoinHandle<String>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_request(&mut socket).await;
+            let reply = format!(
+                "HTTP/1.1 {status} Stub\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(reply.as_bytes()).await.unwrap();
+            socket.shutdown().await.ok();
+            request
+        });
+        (base, task)
+    }
+
+    async fn siteverify(status: u16, body: &'static str) -> (Result<bool, ()>, String) {
+        let (base, request) = stub(status, body).await;
+        let site = Site {
+            base: &base,
+            key: "pilot",
+            secret: "cap-secret",
+        };
+        let result = cap_siteverify(&client(), &site, TOKEN).await;
+        (result, request.await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn cap_siteverify_posts_the_secret_and_token_to_the_site_path() {
+        let (result, request) = siteverify(200, r#"{"success":true}"#).await;
+        assert_eq!(result, Ok(true));
+        assert!(
+            request.starts_with("POST /pilot/siteverify HTTP/1.1\r\n"),
+            "{request}"
+        );
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("content-type: application/json")
+        );
+        let body = request.split_once("\r\n\r\n").unwrap().1;
+        let body: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"secret": "cap-secret", "response": TOKEN})
+        );
+    }
+
+    #[tokio::test]
+    async fn cap_siteverify_rejects_failed_and_refused_tokens() {
+        assert_eq!(siteverify(200, r#"{"success":false}"#).await.0, Ok(false));
+        for status in [400, 403, 404] {
+            let (result, _) = siteverify(status, r#"{"success":true}"#).await;
+            assert_eq!(result, Ok(false), "{status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn cap_siteverify_reports_other_answers_as_unavailable() {
+        for status in [401, 429, 500, 502, 503] {
+            let (result, _) = siteverify(status, r#"{"success":true}"#).await;
+            assert_eq!(result, Err(()), "{status}");
+        }
+        assert_eq!(siteverify(200, "not json").await.0, Err(()));
+        // Nothing listens on a port that was just released: the connection fails.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let site = Site {
+            base: &base,
+            key: "pilot",
+            secret: "cap-secret",
+        };
+        assert_eq!(cap_siteverify(&client(), &site, TOKEN).await, Err(()));
+    }
+
+    #[tokio::test]
+    async fn cap_siteverify_checks_the_secret_and_key_before_calling() {
+        // Nothing listens here, so a request would end as unavailable, not rejected.
+        let site = Site {
+            base: "http://127.0.0.1:9",
+            key: "pilot",
+            secret: "",
+        };
+        assert_eq!(cap_siteverify(&client(), &site, TOKEN).await, Err(()));
+        let site = Site {
+            secret: "cap-secret",
+            ..site
+        };
+        let other = "other:challenge:answer";
+        assert_eq!(cap_siteverify(&client(), &site, other).await, Ok(false));
+    }
+
+    #[tokio::test]
+    async fn verify_cap_uses_the_key_of_the_matched_integration() {
+        let (base, request) = stub(200, r#"{"success":true}"#).await;
+        let cap = CapConfig {
+            verify_url: base,
+            public_url: "https://cap.example.com".into(),
+            sites: vec![CapSite {
+                origin: "https://*.example.com".into(),
+                site_key: "wild".into(),
+                secret: "wild-secret".into(),
+            }],
+        };
+        let token = "wild:challenge:answer";
+        let origin = "https://*.example.com";
+        assert_eq!(verify_cap(&client(), &cap, token, origin).await, Ok(true));
+        let request = request.await.unwrap();
+        assert!(request.starts_with("POST /wild/siteverify "), "{request}");
+        assert!(request.contains(r#""secret":"wild-secret""#));
+        let unknown = "https://other.example";
+        assert_eq!(verify_cap(&client(), &cap, token, unknown).await, Err(()));
     }
 }

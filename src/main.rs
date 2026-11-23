@@ -1,5 +1,6 @@
 mod api;
 mod captcha;
+mod captcha_config;
 mod config;
 mod dns;
 mod public_assets;

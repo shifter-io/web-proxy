@@ -147,7 +147,15 @@ For local real-CAPTCHA development, add `compose.captcha.example.yaml` as an ove
 
 If Google reports a widget error, the SDK keeps its frame and modal open so Google's own message remains visible, and offers Try again or Close. It does not reset/remove the frame automatically on that error: doing so hides domain/key errors and produces misleading canceled network requests. Only a completed challenge can call the session API. Script-load failures and expired challenges also offer an explicit retry. For a localhost rejection, verify that the exact site key returned by the local API is the key whose domain settings you saved in Google; changing another key does not affect the running demo.
 
-Production startup rejects missing credentials and Google's public test credentials. Synthetic tests seed random one-use challenge hashes in private Redis; those records are read only in `APP_ENV=test`. There is no configurable production verifier URL or bypass switch.
+Production startup rejects missing credentials and Google's public test credentials. Synthetic tests seed random one-use challenge hashes in private Redis; those records are read only in `APP_ENV=test`. There is no configurable Google verifier URL or bypass switch.
+
+#### Cap (self-hosted CAPTCHA)
+
+`CAPTCHA_PROVIDER` selects the verifier: `recaptcha` (the default), `cap`, or `cap-staging`. With `cap`, the API verifies Cap tokens against a self-hosted Cap service instead of Google. Cap tokens carry no hostname, so every `INTEGRATIONS` origin (wildcard patterns included, written exactly as in `INTEGRATIONS`) needs its own site key. `CAP_SITES_FILE` names an API-only private JSON file of `[{"origin", "siteKey", "secret"}]` entries; startup refuses a missing or unreadable file, an origin without a key, a key for an origin not in `INTEGRATIONS`, a shared key, a key outside `[A-Za-z0-9_-]` (at most 64 characters), or an empty secret. The API posts `{secret, response}` to `<CAP_VERIFY_URL>/<siteKey>/siteverify` with the key of the integration that matched the request's origin, never a key supplied by the browser. A 200 answer with `success: true` accepts the token; `success: false`, 400, 403 and 404 reject it; any other answer or a connection failure returns `CAPTCHA_UNAVAILABLE`. `CAP_VERIFY_URL` (default `http://capd:3000`) may be plain HTTP because it is meant for the private Compose network beside the API; the site secrets cross that network. `CAP_PUBLIC_URL` is the public bare origin browsers load the widget and challenges from, HTTPS in production. `/api/v1/config` then answers `captchaProvider: "cap"`, the integration's `captchaSiteKey`, `capEndpoint` (`<CAP_PUBLIC_URL>/<siteKey>/`) and `capAssets` (`<CAP_PUBLIC_URL>/assets/`).
+
+`CAPTCHA_ACCEPT_BOTH=true` (with `CAPTCHA_PROVIDER=cap`) accepts both kinds of token during a cutover or rollback: a token containing `:` goes to Cap, any other token to Google, and a rejected token never falls back to the other verifier. Real reCAPTCHA credentials are then required even outside production, and the setting is refused in `APP_ENV=test`. `/api/v1/config` advertises Cap only to SDKs that send `?captcha=cap`; older SDKs keep the reCAPTCHA key.
+
+`CAPTCHA_PROVIDER=cap-staging` is a pilot mode for one development API whose single integration is exactly its HTTPS `CONTROL_ORIGIN`. It verifies against `http://capd:3000` with `CAP_STAGING_SITE_KEY` and the secret file `CAP_STAGING_SECRET_FILE`. `/api/v1/config` still reports `captchaProvider: "recaptcha"` with the pilot key in `captchaSiteKey`, so only the pilot page can use it, not the SDK. Startup refuses it outside a development API.
 
 ### Download restrictions
 
@@ -406,6 +414,13 @@ These advanced settings are set in the local Compose environment or supplied whe
 | `CONTROL_ORIGIN` | `http://localhost:8080` | Legacy synthetic-test origin and local default only |
 | `RECAPTCHA_SITE_KEY` | Empty outside tests | Public standard v2 checkbox key; required in production |
 | `RECAPTCHA_SECRET_FILE` | None | API-only mounted secret file; required in production |
+| `CAPTCHA_PROVIDER` | `recaptcha` | `recaptcha`, `cap`, or the development pilot `cap-staging`; see [Cap](#cap-self-hosted-captcha) |
+| `CAPTCHA_ACCEPT_BOTH` | `false` | `true` accepts reCAPTCHA and Cap tokens during a cutover; needs real reCAPTCHA credentials |
+| `CAP_SITES_FILE` | None | API-only JSON file of `{origin, siteKey, secret}`, one per `INTEGRATIONS` origin; required with Cap |
+| `CAP_VERIFY_URL` | `http://capd:3000` | Private base URL of the Cap service the API verifies tokens with |
+| `CAP_PUBLIC_URL` | None | Public bare origin of the Cap widget and challenges; HTTPS in production |
+| `CAP_STAGING_SITE_KEY` | None | Pilot site key for `CAPTCHA_PROVIDER=cap-staging` |
+| `CAP_STAGING_SECRET_FILE` | None | API-only pilot secret file for `CAPTCHA_PROVIDER=cap-staging` |
 | `RUNTIME_ORIGIN` | `http://localhost:8081` | Exact runtime/WebSocket origin |
 | `CREDENTIALS_FILE` | `/run/secrets/shifter_credentials` | In-container credential path |
 | `WEB_DIR` | `/app/web` in Docker | Static asset root |
@@ -517,7 +532,7 @@ All SDK API calls use `/api/v1`. Send the embedding site's exact `Origin`; authe
 
 | Route | Body | Result |
 | --- | --- | --- |
-| `GET /api/v1/config` | None | Countries, site ID, runtime origin, public CAPTCHA site key, protocol version |
+| `GET /api/v1/config` | None | Countries, site ID, runtime origin, public CAPTCHA site key and provider (`recaptcha` or `cap`, plus `capEndpoint` and `capAssets` for Cap; `?captcha=cap` declares Cap support), protocol version |
 | `POST /api/v1/sessions` | `{country, captchaToken}` | `{session, credential}`; credential returned only for a new identity |
 | `GET /api/v1/session` | None | Current allowance and status |
 | `POST /api/v1/session/tickets` | None | One-use ticket, session revision, 30-second TTL, runtime origin |
