@@ -21,7 +21,35 @@ function loadGoogle(nonce) {
   return googleLoad;
 }
 
-export function challenge(siteKey, {nonce, signal} = {}) {
+let capLoad;
+// Cap is self-hosted: the widget, its wasm and every challenge come from our own Cap server.
+function loadCap(assets, nonce) {
+  if (window.customElements?.get('cap-widget')) return Promise.resolve();
+  if (!capLoad) {
+    capLoad = new Promise((resolve, reject) => {
+      window.CAP_CUSTOM_WASM_URL = `${assets}cap_wasm_bg.wasm`;
+      window.CAP_CUSTOM_HASHWX_URL = `${assets}hashwx.wasm`;
+      const script = document.createElement('script');
+      script.src = `${assets}widget.js`;
+      script.async = true;
+      if (nonce) script.nonce = nonce;
+      const timer = setTimeout(() => finish(new Error('Verification did not load. Check your connection and try again.')), 15000);
+      function finish(error) {
+        clearTimeout(timer);
+        if (error) { script.remove(); capLoad = undefined; reject(error); }
+        else resolve();
+      }
+      script.onerror = () => finish(new Error('Verification could not load. Please try again.'));
+      script.onload = () => finish();
+      document.head.append(script);
+    });
+  }
+  return capLoad;
+}
+
+export function challenge(siteKey, {nonce, signal, provider = 'recaptcha', capEndpoint, capAssets} = {}) {
+  const cap = provider === 'cap';
+  if (cap && (!capEndpoint || !capAssets)) return Promise.reject(Object.assign(new Error('Verification is not configured.'), {code:'CAPTCHA_UNAVAILABLE'}));
   if (!siteKey) return Promise.reject(Object.assign(new Error('Verification is not configured.'), {code:'CAPTCHA_UNAVAILABLE'}));
   const previous = document.activeElement;
   const dialog = document.createElement('dialog');
@@ -88,7 +116,23 @@ export function challenge(siteKey, {nonce, signal} = {}) {
       status.textContent = message;
       retry.hidden = false; retry.disabled = false;
     }
+    async function renderCap() {
+      retry.hidden = true; retry.disabled = true;
+      status.textContent = 'Loading verification…';
+      try {
+        await loadCap(capAssets, nonce);
+        if (settled) return;
+        status.textContent = '';
+        widget.replaceChildren();
+        const element = document.createElement('cap-widget');
+        element.setAttribute('data-cap-api-endpoint', capEndpoint);
+        element.addEventListener('solve', event => finish(null, event.detail?.token));
+        element.addEventListener('error', () => failed('Verification could not complete. Please try again.'));
+        widget.append(element);
+      } catch (error) { failed(error.message || 'Verification could not load. Please try again.'); }
+    }
     async function render() {
+      if (cap) return renderCap();
       retry.hidden = true; retry.disabled = true;
       status.textContent = 'Loading verification…';
       try {
