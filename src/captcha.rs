@@ -59,9 +59,34 @@ pub async fn verify(state: &State, token: &str, hostname: &str) -> Result<bool, 
     Ok(valid(&result, hostname, now_ms()))
 }
 
-/// Verify a Cap token for the website it was solved on. `integration_origin`
-/// is the matched INTEGRATIONS entry, so each site needs its own site key.
-pub async fn verify_cap(
+enum Verifier<'a> {
+    Cap(&'a CapConfig),
+    Legacy,
+}
+
+fn verifier<'a>(cap: Option<&'a CapConfig>, accept_both: bool, token: &str) -> Verifier<'a> {
+    match cap {
+        // Cap carries a colon-delimited site key, challenge and answer. Never
+        // fall back to another verifier after rejection or a transport error.
+        Some(cap) if !accept_both || token.contains(':') => Verifier::Cap(cap),
+        _ => Verifier::Legacy,
+    }
+}
+
+pub async fn verify_for_integration(
+    state: &State,
+    token: &str,
+    hostname: &str,
+    integration_origin: &str,
+) -> Result<bool, ()> {
+    match verifier(state.cfg.cap.as_ref(), state.cfg.captcha_accept_both, token) {
+        Verifier::Cap(cap) => verify_cap(state, cap, token, integration_origin).await,
+        Verifier::Legacy => verify(state, token, hostname).await,
+    }
+}
+
+/// Use the Cap key for the matched integration, not one supplied by the browser.
+async fn verify_cap(
     state: &State,
     cap: &CapConfig,
     token: &str,
@@ -120,6 +145,33 @@ fn cap_site_matches(token: &str, site_key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dual_verification_routes_each_token_once_even_if_the_cap_key_is_wrong() {
+        let cap = CapConfig {
+            verify_url: "http://capd:3000".into(),
+            public_url: "https://cap.example.com".into(),
+            sites: vec![],
+        };
+        for token in ["key:challenge:answer", "wrong:key:answer", "bad:format"] {
+            assert!(matches!(
+                verifier(Some(&cap), true, token),
+                Verifier::Cap(_)
+            ));
+        }
+        assert!(matches!(
+            verifier(Some(&cap), true, "google-token"),
+            Verifier::Legacy
+        ));
+        assert!(matches!(
+            verifier(Some(&cap), false, "google-token"),
+            Verifier::Cap(_)
+        ));
+        assert!(matches!(
+            verifier(None, false, "key:challenge:answer"),
+            Verifier::Legacy
+        ));
+    }
 
     #[test]
     fn cap_requires_the_expected_site_key_and_token_shape() {

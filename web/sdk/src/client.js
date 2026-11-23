@@ -329,7 +329,11 @@ export function create({container, apiOrigin, nonce} = {}) {
       const previousStatus = state.status;
       emit({status:'verifying'});
       let captchaToken;
-      try { captchaToken = await challenge(config.captchaSiteKey,{nonce,signal:controller.signal,provider:config.captchaProvider,capEndpoint:config.capEndpoint,capAssets:config.capAssets}); }
+      try {
+        // Do not reuse a challenge provider from an earlier cutover or rollback.
+        const captcha = await api('config?captcha=cap');
+        captchaToken = await challenge(captcha.captchaSiteKey,{nonce,signal:controller.signal,provider:captcha.captchaProvider,capEndpoint:captcha.capEndpoint,capAssets:captcha.capAssets});
+      }
       finally { emit({status:previousStatus}); }
       const result = await api('sessions','POST',{country,captchaToken});
       if (result.credential) persist(result.credential);

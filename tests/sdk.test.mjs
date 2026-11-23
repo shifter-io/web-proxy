@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {JSDOM} from 'jsdom';
 import {create, destination} from '../web/sdk/src/client.js';
-import {readFile} from 'node:fs/promises';
+import {readFile, readdir} from 'node:fs/promises';
 import {runInNewContext} from 'node:vm';
 
 const flush = async () => { for(let i=0;i<12;i++) await Promise.resolve(); };
@@ -105,12 +105,12 @@ function environment(t) {
   dom.window.HTMLDialogElement.prototype.show = function() {this.open=true;};
   dom.window.HTMLDialogElement.prototype.close = function() {this.open=false;};
   const session = {country:'us', status:'active',serverTime:Date.now(), expiresAt:Date.now()+600000,remainingBytes:1000,byteLimit:1000,connected:false};
-  const requests = []; let widget, failStart = false, statusResponse, resets = 0;
+  const requests = []; let widget, failStart = false, statusResponse, resets = 0, captcha = {};
   dom.window.grecaptcha = {render:(_node,options) => {widget=options;return 0;},reset() {resets++;}};
   t.mock.method(globalThis,'fetch',async (url, options) => {
     requests.push({url,options});
     let data;
-    if(url.endsWith('/config')) data={site:'shifter',countries:[{code:'us',name:'United States'},{code:'de',name:'Germany'}],runtimeOrigin:'https://proxy.example.net',captchaSiteKey:'public-site-key',protocolVersion:1};
+    if(new URL(url).pathname.endsWith('/config')) data={site:'shifter',countries:[{code:'us',name:'United States'},{code:'de',name:'Germany'}],runtimeOrigin:'https://proxy.example.net',captchaSiteKey:'public-site-key',protocolVersion:1,...captcha};
     else if(url.endsWith('/sessions')) {
       if(failStart) return {ok:false,status:403,json:async()=>({code:'CAPTCHA_REJECTED',error:'Please retry verification'})};
       data={session,credential:'a'.repeat(64)};
@@ -130,7 +130,7 @@ function environment(t) {
     await proxy.init();
     const result=proxy.search({url:'example.com',country:'us'});await flush();widget.callback('synthetic-response');await result;
   }
-  return {proxy,requests,start,runtimeMessage,solve:()=>widget.callback('synthetic-response'),widgetError:()=>widget['error-callback'](),expire:()=>widget['expired-callback'](),resets:()=>resets,failStart:()=>{failStart=true;},setStatus:value=>{statusResponse=value;},dom};
+  return {proxy,requests,start,runtimeMessage,solve:()=>widget.callback('synthetic-response'),widgetError:()=>widget['error-callback'](),expire:()=>widget['expired-callback'](),resets:()=>resets,failStart:(value=true)=>{failStart=value;},setStatus:value=>{statusResponse=value;},setCaptcha:value=>{captcha=value;},dom};
 }
 
 test('URL normalization rejects credentials, non-web schemes and ports',()=>{
@@ -146,6 +146,35 @@ test('Search owns CAPTCHA, rejects duplicate clicks, and cancellation never call
   document.querySelector('dialog button').click();await assert.rejects(attempt,{code:'CANCELLED'});
   assert.equal(document.activeElement.id,'search');assert.equal(e.proxy.getState().busy,false);
   assert.ok(!e.requests.some(r=>r.url.endsWith('/sessions')));
+});
+
+test('an open tab picks up Cap and then reCAPTCHA rollback without reloading',async t=>{
+  const e=environment(t);
+  await e.proxy.init();
+  e.dom.window.customElements.define('cap-widget',class extends HTMLElement {});
+  e.setCaptcha({captchaProvider:'cap',captchaSiteKey:'example-key',capEndpoint:'https://cap.example.net/example-key/',capAssets:'https://cap.example.net/assets/'});
+  e.failStart();
+  const target={url:'example.com',country:'us'};
+  const cap=e.proxy.search(target);
+  await flush();
+  const widget=document.querySelector('cap-widget');
+  assert.equal(widget.getAttribute('data-cap-api-endpoint'),'https://cap.example.net/example-key/');
+  widget.dispatchEvent(new e.dom.window.CustomEvent('solve',{detail:{token:'example-key:challenge:answer'}}));
+  await assert.rejects(cap,{code:'CAPTCHA_REJECTED'});
+  assert.equal(e.requests.filter(r=>r.url.endsWith('/sessions')).length,1);
+
+  e.setCaptcha({captchaProvider:'recaptcha'});
+  e.failStart(false);
+  const rollback=e.proxy.search(target);
+  await flush();
+  assert.equal(document.querySelector('cap-widget'),null);
+  e.solve();
+  await rollback;
+  assert.equal(e.proxy.getState().active,true);
+  assert.equal(e.requests.filter(r=>r.url.endsWith('/config?captcha=cap')).length,2);
+  assert.deepEqual(e.requests.filter(r=>r.url.endsWith('/sessions')).map(r=>JSON.parse(r.options.body).captchaToken),[
+    'example-key:challenge:answer','synthetic-response',
+  ]);
 });
 
 test('sessions use cookie-free bearer auth and runtime only receives a single-use ticket',async t=>{
@@ -290,18 +319,22 @@ test('expired allowance never starts a runtime even after a valid challenge',asy
   assert.equal(e.proxy.getState().status,'expired');assert.equal(e.proxy.getState().active,false);assert.equal(document.querySelector('iframe'),null);
 });
 
-test('release manifest matches immutable source and loader selects the published version',async()=>{
+test('latest SDK assets match source without requiring stable loader promotion',async()=>{
   const {createHash}=await import('node:crypto');
   const root=new URL('../web/sdk/',import.meta.url);
   const loader=await readFile(new URL('v1/shifter-web-proxy.js',root),'utf8');
-  const version=loader.match(/const RELEASE = '(\d+\.\d+\.\d+)'/)[1];
-  const manifest=JSON.parse(await readFile(new URL(`releases/${version}/manifest.json`,root),'utf8'));
-  for(const [file,expected] of Object.entries(manifest.sha256)) {
-    const bytes=await readFile(new URL(`releases/${version}/${file}`,root));
-    assert.equal(createHash('sha256').update(bytes).digest('hex'),expected);
-    assert.deepEqual(bytes,await readFile(new URL(`src/${file}`,root)));
+  const stable=loader.match(/const RELEASE = '(\d+\.\d+\.\d+)'/)[1];
+  const published=(await readdir(new URL('releases/',root))).sort((a,b)=>a.localeCompare(b,'en',{numeric:true})).at(-1);
+  for(const version of new Set([stable,published])) {
+    const manifest=JSON.parse(await readFile(new URL(`releases/${version}/manifest.json`,root),'utf8'));
+    assert.equal(manifest.version,version);assert.equal(manifest.protocolVersion,1);
+    assert.deepEqual(Object.keys(manifest.sha256).sort(),['captcha.js','client.js']);
+    for(const [file,expected] of Object.entries(manifest.sha256)) {
+      const bytes=await readFile(new URL(`releases/${version}/${file}`,root));
+      assert.equal(createHash('sha256').update(bytes).digest('hex'),expected);
+      if(version===published) assert.deepEqual(bytes,await readFile(new URL(`src/${file}`,root)));
+    }
   }
-  assert.ok(loader.includes(`const RELEASE = '${manifest.version}'`));assert.equal(manifest.protocolVersion,1);
 });
 
 test('service worker can load reset assets even when engine configuration is unavailable',async()=>{

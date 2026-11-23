@@ -174,7 +174,9 @@ pub struct Config {
     pub captcha_site_key: String,
     pub captcha_secret: String,
     pub cap_staging: bool,
-    /// Cap (self-hosted proof-of-work CAPTCHA) when CAPTCHA_PROVIDER=cap.
+    pub cap_preferred: bool,
+    pub captcha_accept_both: bool,
+    /// Cap verifier settings, also loaded during a dual-provider transition.
     pub cap: Option<CapConfig>,
     pub runtime_origin: String,
     pub region: String,
@@ -446,7 +448,7 @@ impl Config {
         if !["api", "gateway"].contains(&role.as_str()) {
             bail!("invalid ROLE");
         }
-        let (cap_staging, cap_provider) = match val("CAPTCHA_PROVIDER", "recaptcha").as_str() {
+        let (cap_staging, cap_preferred) = match val("CAPTCHA_PROVIDER", "recaptcha").as_str() {
             "recaptcha" => (false, false),
             "cap-staging" => (true, false),
             "cap" => (false, true),
@@ -455,18 +457,27 @@ impl Config {
         if cap_staging && (environment != "development" || role != "api") {
             bail!("Cap pilot is disabled outside a development API");
         }
+        let captcha_accept_both = match val("CAPTCHA_ACCEPT_BOTH", "false").as_str() {
+            "true" => true,
+            "false" => false,
+            _ => bail!("CAPTCHA_ACCEPT_BOTH must be true or false"),
+        };
+        if captcha_accept_both && (cap_staging || test_mode) {
+            bail!("CAPTCHA_ACCEPT_BOTH requires a real CAPTCHA provider outside test mode");
+        }
+        let needs_recaptcha = !cap_preferred || captcha_accept_both;
         let (site_key_var, secret_file_var) = if cap_staging {
             ("CAP_STAGING_SITE_KEY", "CAP_STAGING_SECRET_FILE")
         } else {
             ("RECAPTCHA_SITE_KEY", "RECAPTCHA_SECRET_FILE")
         };
-        let captcha_site_key = if cap_provider {
-            String::new()
-        } else {
+        let captcha_site_key = if needs_recaptcha {
             val(site_key_var, "")
+        } else {
+            String::new()
         };
         // Only the API process receives the verification secret.
-        let captcha_secret = if role == "api" && !cap_provider {
+        let captcha_secret = if role == "api" && needs_recaptcha {
             match env::var(secret_file_var) {
                 Ok(path) if !path.is_empty() => std::fs::read_to_string(path)
                     .map_err(|_| anyhow::anyhow!("cannot read {secret_file_var}"))?
@@ -477,11 +488,11 @@ impl Config {
         } else {
             String::new()
         };
-        let cap = if cap_provider {
+        let cap = if cap_preferred || captcha_accept_both {
             // Site secrets come from a private file, only in the API process.
             let sites: Vec<CapSite> = if role == "api" {
                 let path = env::var("CAP_SITES_FILE")
-                    .context("CAPTCHA_PROVIDER=cap requires CAP_SITES_FILE")?;
+                    .context("Cap verification requires CAP_SITES_FILE")?;
                 let text = std::fs::read_to_string(&path)
                     .map_err(|_| anyhow::anyhow!("cannot read CAP_SITES_FILE"))?;
                 serde_json::from_str(&text)
@@ -503,9 +514,7 @@ impl Config {
         } else {
             None
         };
-        if cap_provider {
-            // Validated above.
-        } else if cap_staging {
+        if cap_staging {
             validate_cap_staging(
                 &environment,
                 &role,
@@ -514,8 +523,12 @@ impl Config {
                 &captcha_site_key,
                 &captcha_secret,
             )?;
-        } else if role == "api" {
-            validate_captcha(&captcha_site_key, &captcha_secret, production)?;
+        } else if role == "api" && needs_recaptcha {
+            validate_captcha(
+                &captcha_site_key,
+                &captcha_secret,
+                production || captcha_accept_both,
+            )?;
         }
         let region = val("SHIFTER_REGION", "blr");
         if !["fra", "ams", "lon", "nyc", "tor", "sgp", "blr", "syd"].contains(&region.as_str()) {
@@ -579,6 +592,8 @@ impl Config {
             captcha_site_key,
             captcha_secret,
             cap_staging,
+            cap_preferred,
+            captcha_accept_both,
             cap,
             runtime_origin,
             region,
